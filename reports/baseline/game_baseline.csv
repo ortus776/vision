@@ -1,0 +1,4 @@
+run_id,scenario,started_at_utc,game_mode,resolution,window_mode,fps_limit,power_profile,warmup_seconds,duration_seconds,average_fps,p50_frame_ms,p95_frame_ms,p99_frame_ms,notes
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,
+,,,,,,,,,,,,,,

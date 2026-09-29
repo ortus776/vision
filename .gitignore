@@ -1,0 +1,22 @@
+# CMake and Visual Studio build output
+/build/
+/out/
+/CMakeUserPresets.json
+/.vs/
+*.user
+*.suo
+
+# Runtime data and models
+/data/raw/
+/data/prepared/
+/reports/runs/
+/models/*.onnx
+/models/*.pt
+
+# Scratch and logs
+*.log
+*.tmp
+
+
+CODE_GUIDE.md
+README.md
