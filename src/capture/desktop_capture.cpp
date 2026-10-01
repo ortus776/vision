@@ -76,6 +76,8 @@ private:
 class AcquiredFrame {
 public:
     explicit AcquiredFrame(IDXGIOutputDuplication* duplication) : duplication_(duplication) {}
+    AcquiredFrame(const AcquiredFrame&) = delete;
+    AcquiredFrame& operator=(const AcquiredFrame&) = delete;
     ~AcquiredFrame() {
         if (acquired_) {
             (void)duplication_->ReleaseFrame();
@@ -226,12 +228,16 @@ struct SelectedOutput {
     throw std::runtime_error("could not find the DXGI output associated with the selected window");
 }
 
-[[nodiscard]] std::vector<std::uint8_t> copy_desktop_crop(
+[[nodiscard]] std::optional<std::vector<std::uint8_t>> copy_desktop_crop(
     IDXGIOutputDuplication* duplication,
     ID3D11Device* device,
     ID3D11DeviceContext* context,
     core::Rect crop_on_output,
-    core::Size roi) {
+    core::Size roi,
+    ComPtr<ID3D11Texture2D>& staging_texture,
+    std::uint32_t timeout_ms,
+    std::int64_t& source_qpc,
+    std::int64_t minimum_present_qpc) {
     D3D11_TEXTURE2D_DESC staging_desc{};
     staging_desc.Width = static_cast<UINT>(roi.width);
     staging_desc.Height = static_cast<UINT>(roi.height);
@@ -242,32 +248,34 @@ struct SelectedOutput {
     staging_desc.Usage = D3D11_USAGE_STAGING;
     staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
 
-    ComPtr<ID3D11Texture2D> staging_texture;
-    check_hr(device->CreateTexture2D(&staging_desc, nullptr, staging_texture.GetAddressOf()),
-             "ID3D11Device::CreateTexture2D(staging)");
+    if (!staging_texture) {
+        check_hr(device->CreateTexture2D(&staging_desc, nullptr, staging_texture.GetAddressOf()),
+                 "ID3D11Device::CreateTexture2D(staging)");
+    }
 
     DXGI_OUTDUPL_FRAME_INFO frame_info{};
     ComPtr<IDXGIResource> desktop_resource;
     AcquiredFrame frame(duplication);
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     for (;;) {
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
             deadline - std::chrono::steady_clock::now());
         if (remaining.count() <= 0) {
-            throw std::runtime_error("timed out waiting for a desktop image update");
+            return std::nullopt;
         }
         const HRESULT result = duplication->AcquireNextFrame(
             static_cast<UINT>(remaining.count()), &frame_info,
             desktop_resource.GetAddressOf());
         if (result == DXGI_ERROR_WAIT_TIMEOUT) {
-            throw std::runtime_error("timed out waiting for a desktop image update");
+            return std::nullopt;
         }
         check_hr(result, "IDXGIOutputDuplication::AcquireNextFrame");
         frame.mark_acquired();
-        if (frame_info.LastPresentTime.QuadPart != 0) {
+        if (frame_info.LastPresentTime.QuadPart != 0 &&
+            frame_info.LastPresentTime.QuadPart >= minimum_present_qpc) {
             break;
         }
-        // A pointer-only update does not contain a new desktop image.
+        // Reject pointer-only updates and images predating the current geometry.
         check_hr(frame.release(), "IDXGIOutputDuplication::ReleaseFrame");
         desktop_resource.Reset();
     }
@@ -307,6 +315,8 @@ struct SelectedOutput {
     } unmap{context, staging_texture.Get()};
 
     const auto stride = static_cast<std::size_t>(roi.width) * 4U;
+    if (mapped.RowPitch < stride) throw std::runtime_error("DXGI RowPitch is smaller than the ROI row");
+    source_qpc = frame_info.LastPresentTime.QuadPart;
     const auto buffer_size = stride * static_cast<std::size_t>(roi.height);
     std::vector<std::uint8_t> pixels(buffer_size);
     const auto* source_bytes = static_cast<const std::uint8_t*>(mapped.pData);
@@ -352,75 +362,120 @@ void list_windows() {
     }
 }
 
-void capture_once(const config::AppConfig& config, const core::Logger& logger) {
-    if (config.window_title.empty()) {
-        throw std::invalid_argument("capture requires a window title substring");
-    }
-
-    platform::windows::set_per_monitor_dpi_awareness();
-    const auto window = platform::windows::find_unique_window(
-        std::wstring(config.window_title.begin(), config.window_title.end()));
-    const auto absolute_roi = core::centered_rect(window.client_screen, config.roi);
-    const auto native_roi = to_native_rect(absolute_roi);
-    const POINT roi_center{
-        native_roi.left + (native_roi.right - native_roi.left) / 2,
-        native_roi.top + (native_roi.bottom - native_roi.top) / 2,
-    };
-    const HMONITOR roi_monitor = MonitorFromPoint(roi_center, MONITOR_DEFAULTTONULL);
-    if (roi_monitor == nullptr) {
-        throw std::runtime_error("the center of the requested ROI is not on an active monitor");
-    }
-
-    MONITORINFO monitor_info{sizeof(MONITORINFO)};
-    if (!GetMonitorInfoW(roi_monitor, &monitor_info)) {
-        throw std::runtime_error("GetMonitorInfoW failed (Win32 error " +
-                                 std::to_string(GetLastError()) + ")");
-    }
-    const core::Rect monitor_rect{
-        monitor_info.rcMonitor.left,
-        monitor_info.rcMonitor.top,
-        monitor_info.rcMonitor.right - monitor_info.rcMonitor.left,
-        monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top,
-    };
-    const auto local_crop = core::relative_rect(absolute_roi, monitor_rect);
+struct DesktopCapture::Impl {
     ComApartment com;
-
-    ComPtr<IDXGIFactory1> factory;
-    check_hr(CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf())),
-             "CreateDXGIFactory1");
-    auto selected_output = find_output(factory.Get(), roi_monitor);
-    if (selected_output.description.Rotation != DXGI_MODE_ROTATION_IDENTITY &&
-        selected_output.description.Rotation != DXGI_MODE_ROTATION_UNSPECIFIED) {
-        throw std::runtime_error("rotated display modes are not supported in this milestone");
-    }
-
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
-    check_hr(D3D11CreateDevice(selected_output.adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN,
-                               nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
-                               D3D11_SDK_VERSION, device.GetAddressOf(), nullptr,
-                               context.GetAddressOf()),
-             "D3D11CreateDevice");
-
     ComPtr<IDXGIOutputDuplication> duplication;
-    check_hr(selected_output.output->DuplicateOutput(device.Get(), duplication.GetAddressOf()),
-             "IDXGIOutput1::DuplicateOutput");
+    ComPtr<ID3D11Texture2D> staging;
+    core::Rect absolute{}, local{}, client{};
+    core::Size size{};
+    HMONITOR monitor{};
+    HWND handle{};
+    std::uint64_t generation{};
+    std::int64_t minimum_present_qpc{};
+    bool prepare(HWND target, core::Size roi) {
+        const auto window = platform::windows::inspect_window(target);
+        const auto absolute_roi = core::centered_rect(window.client_screen, roi);
+        const auto native_roi = to_native_rect(absolute_roi);
+        const POINT roi_center{
+            native_roi.left + (native_roi.right - native_roi.left) / 2,
+            native_roi.top + (native_roi.bottom - native_roi.top) / 2,
+        };
+        const HMONITOR roi_monitor = MonitorFromPoint(roi_center, MONITOR_DEFAULTTONULL);
+        if (roi_monitor == nullptr) {
+            throw std::runtime_error("the center of the requested ROI is not on an active monitor");
+        }
 
-    auto pixels = copy_desktop_crop(duplication.Get(), device.Get(), context.Get(),
-                                    local_crop, config.roi);
+        MONITORINFO monitor_info{sizeof(MONITORINFO)};
+        if (!GetMonitorInfoW(roi_monitor, &monitor_info)) {
+            throw std::runtime_error("GetMonitorInfoW failed (Win32 error " +
+                                     std::to_string(GetLastError()) + ")");
+        }
+        const core::Rect monitor_rect{
+            monitor_info.rcMonitor.left,
+            monitor_info.rcMonitor.top,
+            monitor_info.rcMonitor.right - monitor_info.rcMonitor.left,
+            monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top,
+        };
+        const auto local_crop = core::relative_rect(absolute_roi, monitor_rect);
+        const bool changed = !duplication || handle != target || monitor != roi_monitor ||
+            absolute.left != absolute_roi.left || absolute.top != absolute_roi.top ||
+            size.width != roi.width || size.height != roi.height ||
+            client.width != window.client_screen.width || client.height != window.client_screen.height;
+        if (!changed) return false;
+        LARGE_INTEGER changed_at{};
+        QueryPerformanceCounter(&changed_at);
+        minimum_present_qpc = changed_at.QuadPart;
+        if (!duplication || handle != target || monitor != roi_monitor) {
+            duplication.Reset(); context.Reset(); device.Reset(); staging.Reset();
+            ComPtr<IDXGIFactory1> factory;
+            check_hr(CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf())),
+                     "CreateDXGIFactory1");
+            auto selected_output = find_output(factory.Get(), roi_monitor);
+            if (selected_output.description.Rotation != DXGI_MODE_ROTATION_IDENTITY &&
+                selected_output.description.Rotation != DXGI_MODE_ROTATION_UNSPECIFIED) {
+                throw std::runtime_error("rotated display modes are not supported in this milestone");
+            }
 
-    std::error_code filesystem_error;
-    std::filesystem::create_directories(config.output, filesystem_error);
-    if (filesystem_error) {
-        throw std::runtime_error("could not create output directory (" +
-                                 filesystem_error.message() + ")");
+            check_hr(D3D11CreateDevice(selected_output.adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN,
+                                       nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                                       D3D11_SDK_VERSION, device.GetAddressOf(), nullptr,
+                                       context.GetAddressOf()),
+                     "D3D11CreateDevice");
+
+            check_hr(selected_output.output->DuplicateOutput(device.Get(), duplication.GetAddressOf()),
+                     "IDXGIOutput1::DuplicateOutput");
+
+        }
+        if (size.width != roi.width || size.height != roi.height) staging.Reset();
+        handle = target; monitor = roi_monitor; absolute = absolute_roi; local = local_crop;
+        client = window.client_screen; size = roi; ++generation;
+        return true;
     }
-    const auto path = config.output / make_png_name();
-    save_png(path, config.roi, pixels);
-
-    const auto message = "Captured " + std::to_string(config.roi.width) + "x" +
-                         std::to_string(config.roi.height) + " ROI to " + path.string();
-    logger.write(core::LogLevel::info, message);
+};
+DesktopCapture::DesktopCapture() : impl_(std::make_unique<Impl>()) {}
+DesktopCapture::~DesktopCapture() = default;
+bool DesktopCapture::prepare(std::uintptr_t window, core::Size roi) {
+    return impl_->prepare(reinterpret_cast<HWND>(window), roi);
 }
-
+void DesktopCapture::reset() {
+    impl_->duplication.Reset(); impl_->staging.Reset();
+    impl_->context.Reset(); impl_->device.Reset();
+}
+std::optional<core::Frame> DesktopCapture::next(std::uint32_t timeout_ms) {
+    if (!impl_->duplication) throw std::logic_error("capture source is not prepared");
+    std::int64_t source_qpc{};
+    auto pixels = copy_desktop_crop(impl_->duplication.Get(), impl_->device.Get(),
+        impl_->context.Get(), impl_->local, impl_->size, impl_->staging, timeout_ms, source_qpc,
+        impl_->minimum_present_qpc);
+    if (!pixels) return std::nullopt;
+    core::Frame frame;
+    frame.size = impl_->size; frame.source_size = {impl_->client.width, impl_->client.height};
+    frame.roi = impl_->absolute; frame.generation = impl_->generation;
+    frame.pixels = std::move(*pixels); frame.source_qpc = source_qpc;
+    frame.captured_utc_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    return frame;
+}
+void encode_png(const std::filesystem::path& path, core::Size size,
+                const std::vector<std::uint8_t>& pixels) {
+    ComApartment com;
+    save_png(path, size, pixels);
+}
+void capture_once(const config::AppConfig& config, const core::Logger& logger) {
+    platform::windows::set_per_monitor_dpi_awareness();
+    const auto window = platform::windows::find_unique_window(
+        platform::windows::wide_from_utf8(config.window_title));
+    DesktopCapture source;
+    source.prepare(reinterpret_cast<std::uintptr_t>(window.handle), config.roi);
+    auto frame = source.next(5000);
+    if (!frame) throw std::runtime_error("timed out waiting for a desktop image update");
+    std::filesystem::create_directories(config.output);
+    const auto path = config.output / make_png_name();
+    auto temp = path; temp += ".tmp";
+    encode_png(temp, config.roi, frame->pixels);
+    std::filesystem::rename(temp, path);
+    logger.write(core::LogLevel::info, "Captured ROI to " + path.string());
+}
 } // namespace pubg_vision::capture

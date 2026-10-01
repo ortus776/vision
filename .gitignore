@@ -16,6 +16,8 @@
 # Scratch and logs
 *.log
 *.tmp
+__pycache__/
+*.py[cod]
 
 
 CODE_GUIDE.md

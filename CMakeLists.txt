@@ -7,10 +7,16 @@ project(pubg_vision
 )
 
 include(CTest)
+find_package(Threads REQUIRED)
 
-add_library(pubg_vision_core STATIC src/config/app_config.cpp)
+add_library(pubg_vision_core STATIC
+    src/config/app_config.cpp
+    src/collection/capture_scheduler.cpp
+    src/dataset/dataset_writer.cpp
+)
 target_include_directories(pubg_vision_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_features(pubg_vision_core PUBLIC cxx_std_20)
+target_link_libraries(pubg_vision_core PUBLIC Threads::Threads)
 
 if(MSVC)
     target_compile_options(pubg_vision_core PUBLIC /W4 /permissive- /Zc:__cplusplus /utf-8 /EHsc)
@@ -25,29 +31,41 @@ target_compile_definitions(pubg_vision_app PRIVATE
 )
 
 if(WIN32)
-    target_sources(pubg_vision_app PRIVATE
+    add_library(pubg_vision_windows STATIC
+        src/app/collect.cpp
+        src/input/windows_input.cpp
         src/capture/desktop_capture.cpp
         src/platform/windows/window_selection.cpp
     )
-    target_compile_definitions(pubg_vision_app PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_link_libraries(pubg_vision_app PRIVATE d3d11 dxgi windowscodecs ole32 user32)
+    target_compile_definitions(pubg_vision_windows PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX
+        PRIVATE PUBGVISION_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(pubg_vision_windows PUBLIC pubg_vision_core d3d11 dxgi windowscodecs ole32 user32)
+    target_link_libraries(pubg_vision_app PRIVATE pubg_vision_windows)
 else()
-    target_sources(pubg_vision_app PRIVATE src/capture/desktop_capture_stub.cpp)
+    target_sources(pubg_vision_app PRIVATE src/capture/desktop_capture_stub.cpp src/app/collect_stub.cpp)
 endif()
 
 if(BUILD_TESTING)
     add_executable(pubg_vision_unit_tests tests/unit/core_tests.cpp)
     target_link_libraries(pubg_vision_unit_tests PRIVATE pubg_vision_core)
     add_test(NAME pubg_vision_unit_tests COMMAND pubg_vision_unit_tests)
+    add_executable(pubg_vision_collection_tests tests/unit/collection_tests.cpp)
+    target_link_libraries(pubg_vision_collection_tests PRIVATE pubg_vision_core)
+    add_test(NAME pubg_vision_collection_tests COMMAND pubg_vision_collection_tests)
+    set_tests_properties(pubg_vision_collection_tests PROPERTIES TIMEOUT 60
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME pubg_vision_session_validation
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/session_validation_test.py")
+    endif()
 
     if(WIN32)
         add_executable(pubg_vision_capture_smoke
             tests/manual/capture_smoke.cpp
-            src/capture/desktop_capture.cpp
-            src/platform/windows/window_selection.cpp
         )
-        target_link_libraries(pubg_vision_capture_smoke PRIVATE pubg_vision_core
-            d3d11 dxgi windowscodecs ole32 user32 gdi32 dwmapi)
-        target_compile_definitions(pubg_vision_capture_smoke PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+        target_link_libraries(pubg_vision_capture_smoke PRIVATE pubg_vision_windows gdi32 dwmapi)
+        add_executable(pubg_vision_collect_smoke tests/manual/collect_smoke.cpp)
+        target_link_libraries(pubg_vision_collect_smoke PRIVATE pubg_vision_windows gdi32)
     endif()
 endif()

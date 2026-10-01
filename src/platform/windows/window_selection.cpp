@@ -5,12 +5,13 @@
 #include <algorithm>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
+#include <exception>
 
 namespace pubg_vision::platform::windows {
 namespace {
 
-BOOL CALLBACK collect_window(HWND handle, LPARAM parameter) {
-    auto& windows = *reinterpret_cast<std::vector<WindowInfo>*>(parameter);
+BOOL append_window(HWND handle, std::vector<WindowInfo>& windows) {
     if (!IsWindowVisible(handle) || IsIconic(handle) || GetWindow(handle, GW_OWNER) != nullptr) {
         return TRUE;
     }
@@ -57,6 +58,16 @@ BOOL CALLBACK collect_window(HWND handle, LPARAM parameter) {
     return TRUE;
 }
 
+struct EnumerationContext {
+    std::vector<WindowInfo> windows;
+    std::exception_ptr error;
+};
+BOOL CALLBACK collect_window(HWND handle, LPARAM parameter) noexcept {
+    auto& context = *reinterpret_cast<EnumerationContext*>(parameter);
+    try { return append_window(handle, context.windows); }
+    catch (...) { context.error = std::current_exception(); return FALSE; }
+}
+
 } // namespace
 
 void set_per_monitor_dpi_awareness() {
@@ -72,10 +83,13 @@ void set_per_monitor_dpi_awareness() {
 }
 
 std::vector<WindowInfo> visible_windows() {
-    std::vector<WindowInfo> windows;
-    if (!EnumWindows(collect_window, reinterpret_cast<LPARAM>(&windows))) {
+    EnumerationContext context;
+    const auto enumerated = EnumWindows(collect_window, reinterpret_cast<LPARAM>(&context));
+    if (context.error) std::rethrow_exception(context.error);
+    if (!enumerated) {
         throw std::runtime_error("EnumWindows failed");
     }
+    auto windows = std::move(context.windows);
     std::sort(windows.begin(), windows.end(), [](const auto& lhs, const auto& rhs) {
         return lhs.title < rhs.title;
     });
@@ -102,6 +116,26 @@ WindowInfo find_unique_window(std::wstring_view title_substring) {
         throw std::runtime_error("window title matches more than one window; use --list-windows and a more specific title");
     }
     return std::move(matches.front());
+}
+
+WindowInfo inspect_window(HWND handle) {
+    std::vector<WindowInfo> windows;
+    if (!IsWindow(handle)) throw std::runtime_error("selected window no longer exists");
+    append_window(handle, windows);
+    if (windows.empty()) throw std::runtime_error("selected window is minimized or unavailable");
+    return std::move(windows.front());
+}
+
+std::wstring wide_from_utf8(std::string_view text) {
+    if (text.empty()) return {};
+    const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
+                                        static_cast<int>(text.size()), nullptr, 0);
+    if (count <= 0) throw std::invalid_argument("window title is not valid UTF-8");
+    std::wstring result(static_cast<std::size_t>(count), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
+                            static_cast<int>(text.size()), result.data(), count) != count)
+        throw std::runtime_error("could not convert window title from UTF-8");
+    return result;
 }
 
 } // namespace pubg_vision::platform::windows

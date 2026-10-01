@@ -179,6 +179,13 @@ void expect_color(const std::vector<std::uint8_t>& pixels, int width, int x, int
 [[nodiscard]] std::filesystem::path run_capture_case(
     HWND window, pubg_vision::core::Size roi, const std::filesystem::path& output,
     const char* label) {
+    MSG pending{};
+    while (PeekMessageW(&pending, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&pending);
+        DispatchMessageW(&pending);
+    }
+    SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     InvalidateRect(window, nullptr, TRUE);
     UpdateWindow(window);
     (void)DwmFlush();
@@ -188,14 +195,15 @@ void expect_color(const std::vector<std::uint8_t>& pixels, int width, int x, int
         kWindowTitle);
     const auto requested_roi = pubg_vision::core::centered_rect(selected_window.client_screen,
                                                                   roi);
-    POINT sample{ kClientWidth / 4, kClientHeight / 4 };
-    ClientToScreen(window, &sample);
-    HDC desktop_dc = GetDC(nullptr);
-    const COLORREF desktop_color = GetPixel(desktop_dc, sample.x, sample.y);
-    ReleaseDC(nullptr, desktop_dc);
-    if (desktop_color != RGB(255, 0, 0)) {
-        throw std::runtime_error("the test window is not visible at its expected screen position");
+    POINT sample{selected_window.client_screen.left + selected_window.client_screen.width / 4,
+                 selected_window.client_screen.top + selected_window.client_screen.height / 4};
+    const auto visible = GetAncestor(WindowFromPoint(sample), GA_ROOT);
+    if (visible != window) {
+        throw std::runtime_error("test window is occluded; move other windows away before running GUI smoke");
     }
+    // Verify visibility through the decoded DXGI PNG below. A screen GDI DC may
+    // not expose pixels of an output on another adapter, so GetPixel is not a
+    // valid precondition for that capture path.
     std::cout << label << ": client (" << selected_window.client_screen.left << ","
               << selected_window.client_screen.top << ") "
               << selected_window.client_screen.width << "x"
@@ -226,6 +234,8 @@ void expect_color(const std::vector<std::uint8_t>& pixels, int width, int x, int
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+        SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         InvalidateRect(window, nullptr, FALSE);
         UpdateWindow(window);
         Sleep(30);
@@ -270,7 +280,7 @@ int main(int argc, char* argv[]) {
         if (!AdjustWindowRect(&outer, WS_OVERLAPPEDWINDOW, FALSE)) {
             throw std::runtime_error("AdjustWindowRect failed");
         }
-        HWND window = CreateWindowExW(0, kWindowClass, kWindowTitle, WS_OVERLAPPEDWINDOW,
+        HWND window = CreateWindowExW(WS_EX_TOPMOST, kWindowClass, kWindowTitle, WS_OVERLAPPEDWINDOW,
                                       outer.left, outer.top, outer.right - outer.left,
                                       outer.bottom - outer.top, nullptr, nullptr,
                                       window_class.hInstance, nullptr);

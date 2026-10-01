@@ -118,6 +118,18 @@ void test_cli_configuration() {
     expect(static_cast<bool>(valid_capture) && valid_capture.config.capture_once &&
                valid_capture.config.window_title == "PUBG",
            "accepts an explicit window for one-shot capture");
+    constexpr std::array<std::string_view, 7> collect_args{
+        "--collect", "--window-title", "PUBG", "--writer-capacity", "2", "--merge-ms", "0"};
+    const auto collect = parse_arguments(collect_args);
+    expect(collect && collect.config.collect && collect.config.writer_capacity == 2 &&
+           collect.config.collection.merge_window == 0, "accepts bounded collector settings");
+    constexpr std::array<std::string_view, 4> conflict{
+        "--collect", "--capture-once", "--window-title", "PUBG"};
+    expect(!parse_arguments(conflict), "collector excludes one-shot capture");
+    constexpr std::array<std::string_view, 2> help{"--collect", "--help"};
+    expect(static_cast<bool>(parse_arguments(help)), "help does not require a capture target");
+    constexpr std::array<std::string_view, 2> capacity{"--writer-capacity", "4097"};
+    expect(!parse_arguments(capacity), "rejects unreasonable queue size");
 }
 
 } // namespace

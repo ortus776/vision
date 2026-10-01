@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "core/geometry.hpp"
+#include "collection/capture_scheduler.hpp"
 
 namespace pubg_vision::config {
 
@@ -19,6 +20,9 @@ struct AppConfig {
     bool show_version{false};
     bool capture_once{false};
     bool list_windows{false};
+    bool collect{false};
+    collection::Settings collection;
+    std::size_t writer_capacity{16};
 };
 
 struct ParseResult {
