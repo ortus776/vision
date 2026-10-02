@@ -12,6 +12,7 @@
 #include "config/app_config.hpp"
 #include "core/logger.hpp"
 #include "app/collect.hpp"
+#include "app/live.hpp"
 
 #ifndef PUBGVISION_VERSION
 #define PUBGVISION_VERSION "0.0.0"
@@ -74,13 +75,21 @@ int main(int argc, char* argv[]) {
             pubg_vision::app::collect(parsed.config, logger);
             return 0;
         }
+        if (parsed.config.live) {
+            pubg_vision::app::live(parsed.config, logger);
+            return 0;
+        }
+        if (parsed.config.inference_demo) {
+            pubg_vision::app::inference_demo(parsed.config, logger);
+            return 0;
+        }
     } catch (const std::exception& exception) {
         logger.write(pubg_vision::core::LogLevel::error, exception.what());
         return 1;
     }
 
     logger.write(pubg_vision::core::LogLevel::info,
-                 "Use --list-windows, --capture-once or --collect.");
+                 "Use --list-windows, --capture-once, --collect, --live or --inference-demo.");
 
     const auto message = "Configured ROI: " + std::to_string(parsed.config.roi.width) + "x" +
                          std::to_string(parsed.config.roi.height) + "; output directory: " +

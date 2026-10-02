@@ -8,6 +8,8 @@
 
 #include "core/geometry.hpp"
 #include "collection/capture_scheduler.hpp"
+#include "inference/pipeline.hpp"
+#include "render/raster.hpp"
 
 namespace pubg_vision::config {
 
@@ -21,6 +23,15 @@ struct AppConfig {
     bool capture_once{false};
     bool list_windows{false};
     bool collect{false};
+    bool start_active{false};
+    bool live{false};
+    bool inference_demo{false};
+    bool synthetic_source{false};
+    inference::ModelSpec model;
+    inference::PipelineSettings inference;
+    render::Style overlay_style{render::Style::box};
+    std::uint32_t mock_seed{42};
+    std::int32_t demo_frames{10};
     collection::Settings collection;
     std::size_t writer_capacity{16};
 };

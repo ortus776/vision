@@ -113,6 +113,12 @@ def validate(directory):
         errors.append('missing/inconsistent session_finished summary')
     for error in errors:
         print(f'ERROR: {error}')
+    if not frames:
+        if not requested:
+            print('WARNING: empty session; no capture requests were generated. '
+                  'Check collection_status/control events, F8 and selected-window focus.')
+        else:
+            print('WARNING: no images were saved. Inspect skipped/cancelled/write_failed events.')
     print(f'{directory}: frames={len(frames)}, requests={len(requested)}, errors={len(errors)}')
     return not errors
 

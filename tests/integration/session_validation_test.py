@@ -48,6 +48,23 @@ with tempfile.TemporaryDirectory(prefix='session-validator-', dir=build) as temp
     frames.write_text(json.dumps(frame) + '\n', encoding='utf-8')
     events.write_text(json.dumps(event) + '\n' + json.dumps(finish) + '\n', encoding='utf-8')
     assert valid(directory), 'valid fixture should pass'
+    empty = directory / 'empty'
+    (empty / 'images').mkdir(parents=True)
+    (empty / 'session.json').write_text(json.dumps(session), encoding='utf-8')
+    (empty / 'frames.jsonl').write_text('', encoding='utf-8')
+    empty_finish = {'type': 'session_finished', 'saved': 0}
+    (empty / 'events.jsonl').write_text(json.dumps(empty_finish) + '\n', encoding='utf-8')
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert module.validate(empty), 'a completed empty session is consistent'
+    assert 'no capture requests were generated' in output.getvalue(), 'empty session must explain missing requests'
+    (empty / 'events.jsonl').write_text(json.dumps(event) + '\n' +
+        json.dumps({'type': 'skipped', 'requests': [request]}) + '\n' +
+        json.dumps(empty_finish) + '\n', encoding='utf-8')
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert module.validate(empty), 'a session with accounted skipped requests is consistent'
+    assert 'no images were saved' in output.getvalue(), 'skipped requests must be distinguished from no requests'
     original = image.read_bytes()
     image.write_bytes(original[:-5])
     assert not valid(directory), 'truncated PNG should fail'

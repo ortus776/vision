@@ -1,4 +1,5 @@
 #include "collection/capture_scheduler.hpp"
+#include "collection/collection_state.hpp"
 #include "dataset/dataset_writer.hpp"
 #include "core/json.hpp"
 #include "input/button_edge.hpp"
@@ -18,6 +19,22 @@ using namespace pubg_vision;
 int failures{};
 void expect(bool ok, const char* name) { if (!ok) { ++failures; std::cerr << "FAIL: " << name << '\n'; } }
 void scheduler_tests() {
+    using collection::collection_state;
+    using collection::CollectionState;
+    expect(collection_state(false, false, true, true, false) == CollectionState::waiting,
+           "foreground window alone does not enable collection");
+    expect(collection_state(true, false, true, true, false) == CollectionState::user_paused,
+           "F8 pause is distinct from never-started collection");
+    expect(collection_state(true, true, true, false, false) == CollectionState::focus_paused,
+           "enabled collector explains loss of focus");
+    expect(collection_state(true, true, false, true, false) == CollectionState::recovering,
+           "missing source is distinct from user pause");
+    expect(collection_state(true, false, false, true, false) == CollectionState::user_paused,
+           "source recovery cannot override user's pause");
+    expect(collection_state(true, true, true, true, false) == CollectionState::collecting,
+           "enabled ready foreground collector is active");
+    expect(collection_state(false, false, false, false, true) == CollectionState::stopping,
+           "stop takes precedence over every pause reason");
     input::LeftButtonEdge button;
     expect(button.update(true, false), "button down creates an edge");
     expect(!button.update(true, false) && !button.update(false, false), "holding button creates one burst");

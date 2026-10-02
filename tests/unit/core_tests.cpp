@@ -130,6 +130,43 @@ void test_cli_configuration() {
     expect(static_cast<bool>(parse_arguments(help)), "help does not require a capture target");
     constexpr std::array<std::string_view, 2> capacity{"--writer-capacity", "4097"};
     expect(!parse_arguments(capacity), "rejects unreasonable queue size");
+    constexpr std::array<std::string_view, 4> immediate{
+        "--collect", "--window-title", "PUBG", "--start-active"};
+    const auto active = parse_arguments(immediate);
+    expect(active && active.config.start_active, "start-active explicitly enables collector");
+    constexpr std::array<std::string_view, 1> invalid_start{"--start-active"};
+    expect(!parse_arguments(invalid_start), "start-active requires collector command");
+    expect(!collect.config.start_active, "collector still waits for F8 by default");
+    constexpr std::array<std::string_view, 11> live_args{
+        "--live", "--window-title", "Test", "--input-width", "320", "--inference-fps", "15",
+        "--confidence", "0.4", "--overlay-style", "point"};
+    const auto live = parse_arguments(live_args);
+    expect(live && live.config.live && live.config.model.input_size.width == 320 &&
+        live.config.inference.fps == 15 && live.config.overlay_style == pubg_vision::render::Style::point,
+        "parses live pipeline settings");
+    constexpr std::array<std::string_view, 5> demo_args{
+        "--inference-demo", "--demo-frames", "3", "--mock-seed", "0"};
+    const auto demo = parse_arguments(demo_args);
+    expect(demo && demo.config.inference_demo && demo.config.demo_frames == 3 && demo.config.mock_seed == 0,
+        "demo needs no desktop window and accepts seed zero");
+    constexpr std::array<std::string_view, 1> no_live_window{"--live"};
+    expect(!parse_arguments(no_live_window), "live requires a target window");
+    constexpr std::array<std::string_view, 4> live_collect{"--live", "--collect", "--window-title", "Test"};
+    expect(!parse_arguments(live_collect), "live and collector are exclusive");
+    constexpr std::array<std::string_view, 2> live_help{"--live", "--help"};
+    expect(static_cast<bool>(parse_arguments(live_help)), "live help needs no target");
+    constexpr std::array<std::string_view, 3> huge_input{"--inference-demo", "--input-width", "2049"};
+    expect(!parse_arguments(huge_input), "model dimensions are bounded");
+    constexpr std::array<std::string_view, 3> nan_confidence{"--inference-demo", "--confidence", "nan"};
+    expect(!parse_arguments(nan_confidence), "confidence rejects NaN");
+    constexpr std::array<std::string_view, 3> too_fast{"--inference-demo", "--inference-fps", "121"};
+    expect(!parse_arguments(too_fast), "inference frequency is bounded");
+    constexpr std::array<std::string_view, 3> unsupported{"--inference-demo", "--backend", "onnx"};
+    expect(!parse_arguments(unsupported), "unsupported model backend is explicit");
+    constexpr std::array<std::string_view, 4> synthetic{"--live", "--window-title", "Test", "--synthetic-source"};
+    expect(parse_arguments(synthetic).config.synthetic_source && parse_arguments(synthetic), "live rendering test can use synthetic frames");
+    constexpr std::array<std::string_view, 2> invalid_synthetic{"--inference-demo", "--synthetic-source"};
+    expect(!parse_arguments(invalid_synthetic), "synthetic-source flag applies only to live overlay");
 }
 
 } // namespace
