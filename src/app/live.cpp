@@ -96,16 +96,15 @@ private:
                 });
                 if (stopping_) return;
             }
-        } catch (const std::exception& error) {
-            std::lock_guard lock(mutex_); status_.ready = false; status_.error = error.what(); ++status_.failures; fatal_ = true;
         } catch (...) {
-            std::lock_guard lock(mutex_); status_.ready = false; status_.error = "unexpected capture worker failure"; ++status_.failures; fatal_ = true;
+            std::lock_guard lock(mutex_); status_.ready = false; ++status_.failures; error_ = std::current_exception();
         }
     }
 public:
     void check_error() const {
-        std::lock_guard lock(mutex_);
-        if (fatal_) throw std::runtime_error(status_.error);
+        std::exception_ptr error;
+        { std::lock_guard lock(mutex_); error = error_; }
+        if (error) std::rethrow_exception(error);
     }
 private:
     inference::Pipeline& pipeline_;
@@ -116,7 +115,8 @@ private:
     std::condition_variable wake_;
     Target target_;
     CaptureStatus status_;
-    bool stopping_{}, fatal_{};
+    bool stopping_{};
+    std::exception_ptr error_;
     std::thread worker_;
 };
 }
@@ -128,7 +128,9 @@ void live(const config::AppConfig& config, const core::Logger& logger) {
     auto selected = windows::find_unique_window(title);
     const auto start = steady_clock::now();
     const inference::Clock now = [&] { return duration_cast<milliseconds>(steady_clock::now() - start).count(); };
-    inference::Pipeline pipeline(make_model(config), config.inference, now);
+    auto model = make_model(config);
+    const std::string backend(model->backend_name());
+    inference::Pipeline pipeline(std::move(model), config.inference, now);
     pipeline.invalidate(1, false);
     render::WindowsOverlay overlay;
     input::WindowsInput input(now);
@@ -139,7 +141,8 @@ void live(const config::AppConfig& config, const core::Logger& logger) {
     bool enabled = true, stopping = false, drawn = false;
     std::string reported_state;
     auto retry_at = steady_clock::now();
-    logger.write(core::LogLevel::info, "LIVE MOCK: random detections, not a trained model. F8 pauses/resumes; F9 stops. Focus selected window.");
+    logger.write(core::LogLevel::info, "LIVE backend=" + backend + "; F8 pauses/resumes; F9 stops. Focus selected window.");
+    if (backend == "mock") logger.write(core::LogLevel::info, "Mock model produces random detections.");
     logger.write(core::LogLevel::info, config.synthetic_source ? "Source: synthetic frames for overlay testing" : "Source: DXGI desktop capture");
     while (!stopping) {
         input.pump();
@@ -165,7 +168,7 @@ void live(const config::AppConfig& config, const core::Logger& logger) {
             target.handle = current.handle; target.client = current.client_screen; target.monitor = current.monitor;
             target.roi = core::centered_rect(current.client_screen, config.roi);
             target.active = enabled && !stopping && GetForegroundWindow() == current.handle;
-            state = !enabled ? "PAUSED by F8" : (!target.active ? "PAUSED: selected window is not foreground" : "LIVE MOCK: processing selected window");
+            state = !enabled ? "PAUSED by F8" : (!target.active ? "PAUSED: selected window is not foreground" : "LIVE (" + backend + "): processing selected window");
         } catch (const std::exception& error) { state = "PAUSED: " + std::string(error.what()); }
         const auto status = capture.status();
         const bool failed = status.failures != seen_failures;

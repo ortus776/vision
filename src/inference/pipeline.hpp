@@ -25,7 +25,7 @@ struct PipelineSettings {
 struct PipelineStats { std::uint64_t submitted{}, replaced{}, processed{}, stale_discarded{}; };
 using Clock = std::function<std::int64_t()>; // Same monotonic origin as Frame::captured_ms.
 [[nodiscard]] DetectionResult process(const FramePacket& packet, Model& model,
-    const PostprocessSettings& settings, PreparedInput& scratch, const Clock& clock);
+    const PostprocessSettings& settings, PreparedInput& scratch, const Clock& clock, std::stop_token stop = {});
 [[nodiscard]] bool visible(const DetectionResult& result, std::uint64_t generation,
     core::Rect roi, std::int64_t now_ms, std::int32_t ttl_ms) noexcept;
 
@@ -41,7 +41,7 @@ public:
     [[nodiscard]] std::optional<DetectionResult> latest() const;
     [[nodiscard]] PipelineStats stats() const;
     void check_error() const;
-    void stop(); // Owner thread; joins a running model call before returning.
+    void stop(); // Owner thread; requests cancellation, then joins the running model call.
 private:
     void run() noexcept;
     std::unique_ptr<Model> model_;
@@ -56,6 +56,7 @@ private:
     std::uint64_t revision_{}; // Also invalidates a running call across pause/resume at the same geometry.
     bool active_{true}, stopping_{};
     std::exception_ptr error_;
+    std::stop_source run_stop_;
     std::thread worker_;
 };
 } // namespace pubg_vision::inference

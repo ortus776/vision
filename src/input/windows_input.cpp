@@ -40,7 +40,7 @@ void WindowsInput::push(Action action) {
     }
     events_.push_back({action, clock_(), GetForegroundWindow() == target_});
 }
-LRESULT CALLBACK WindowsInput::procedure(HWND window, UINT msg, WPARAM wp, LPARAM lp) {
+LRESULT CALLBACK WindowsInput::procedure(HWND window, UINT msg, WPARAM wp, LPARAM lp) noexcept {
     if (msg == WM_NCCREATE) {
         const auto* create = reinterpret_cast<CREATESTRUCTW*>(lp);
         SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
@@ -57,7 +57,7 @@ LRESULT CALLBACK WindowsInput::procedure(HWND window, UINT msg, WPARAM wp, LPARA
                 UINT size = sizeof(raw);
                 const UINT read = GetRawInputData(reinterpret_cast<HRAWINPUT>(lp), RID_INPUT,
                                                   &raw, &size, sizeof(RAWINPUTHEADER));
-                if (read == static_cast<UINT>(-1)) self->error_ = "GetRawInputData failed";
+                if (read == static_cast<UINT>(-1)) self->read_error_ = true;
                 else if (read >= sizeof(RAWINPUTHEADER) && raw.header.dwType == RIM_TYPEMOUSE) {
                     const auto flags = raw.data.mouse.usButtonFlags;
                     if (self->left_button_.update((flags & RI_MOUSE_LEFT_BUTTON_DOWN) != 0,
@@ -65,7 +65,7 @@ LRESULT CALLBACK WindowsInput::procedure(HWND window, UINT msg, WPARAM wp, LPARA
                         self->push(Action::click);
                 }
             }
-        } catch (...) { self->error_ = "input event processing failed"; }
+        } catch (...) { self->error_ = std::current_exception(); }
     }
     // DefWindowProc handles the required WM_INPUT foreground cleanup.
     return DefWindowProcW(window, msg, wp, lp);
@@ -75,7 +75,8 @@ void WindowsInput::pump() {
     while (PeekMessageW(&message, window_, 0, 0, PM_REMOVE)) {
         TranslateMessage(&message); DispatchMessageW(&message);
     }
-    if (!error_.empty()) throw std::runtime_error(error_);
+    if (error_) std::rethrow_exception(error_);
+    if (read_error_) throw std::runtime_error("GetRawInputData failed");
 }
 std::deque<InputEvent> WindowsInput::take() { auto result = std::move(events_); events_.clear(); return result; }
 } // namespace pubg_vision::input

@@ -17,6 +17,7 @@ struct AppConfig {
     core::Size roi{640, 640};
     std::filesystem::path output{"data/raw"};
     std::string window_title;
+    std::string backend{"mock"};
     bool verbose{false};
     bool show_help{false};
     bool show_version{false};

@@ -22,6 +22,7 @@
 
 #include "capture/desktop_capture.hpp"
 #include "core/geometry.hpp"
+#include "core/filesystem.hpp"
 #include "platform/windows/window_selection.hpp"
 
 namespace pubg_vision::capture {
@@ -123,21 +124,6 @@ void check_hr(HRESULT result, const char* operation) {
         throw std::out_of_range("capture rectangle is outside Windows coordinate limits");
     }
     return RECT{rect.left, rect.top, static_cast<LONG>(right), static_cast<LONG>(bottom)};
-}
-
-[[nodiscard]] std::wstring make_png_name() {
-    const auto now = std::chrono::system_clock::now();
-    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now.time_since_epoch());
-    const auto time = std::chrono::system_clock::to_time_t(now);
-    std::tm utc{};
-    gmtime_s(&utc, &time);
-
-    std::wostringstream name;
-    name << L"frame_" << std::put_time(&utc, L"%Y%m%dT%H%M%S") << L'_'
-         << std::setw(3) << std::setfill(L'0') << (milliseconds.count() % 1000)
-         << L".png";
-    return name.str();
 }
 
 void save_png(const std::filesystem::path& path,
@@ -471,8 +457,9 @@ void capture_once(const config::AppConfig& config, const core::Logger& logger) {
     source.prepare(reinterpret_cast<std::uintptr_t>(window.handle), config.roi);
     auto frame = source.next(5000);
     if (!frame) throw std::runtime_error("timed out waiting for a desktop image update");
-    std::filesystem::create_directories(config.output);
-    const auto path = config.output / make_png_name();
+    const auto directory = core::unique_directory(config.output,
+        "capture_" + std::to_string(core::utc_milliseconds()));
+    const auto path = directory / "frame.png";
     auto temp = path; temp += ".tmp";
     encode_png(temp, config.roi, frame->pixels);
     std::filesystem::rename(temp, path);

@@ -19,6 +19,9 @@
 __pycache__/
 *.py[cod]
 
-
+# Local Python environment used by the inference documentation.
+/.venv-inference/
 CODE_GUIDE.md
 README.md
+/reports/
+/docs/

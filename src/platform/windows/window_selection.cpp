@@ -67,6 +67,15 @@ BOOL CALLBACK collect_window(HWND handle, LPARAM parameter) noexcept {
     try { return append_window(handle, context.windows); }
     catch (...) { context.error = std::current_exception(); return FALSE; }
 }
+struct MonitorContext {
+    std::vector<HMONITOR> monitors;
+    std::exception_ptr error;
+};
+BOOL CALLBACK collect_monitor(HMONITOR monitor, HDC, LPRECT, LPARAM parameter) noexcept {
+    auto& context = *reinterpret_cast<MonitorContext*>(parameter);
+    try { context.monitors.push_back(monitor); return TRUE; }
+    catch (...) { context.error = std::current_exception(); return FALSE; }
+}
 
 } // namespace
 
@@ -94,6 +103,13 @@ std::vector<WindowInfo> visible_windows() {
         return lhs.title < rhs.title;
     });
     return windows;
+}
+std::vector<HMONITOR> display_monitors() {
+    MonitorContext context;
+    const auto success = EnumDisplayMonitors(nullptr, nullptr, collect_monitor, reinterpret_cast<LPARAM>(&context));
+    if (context.error) std::rethrow_exception(context.error);
+    if (!success) throw std::runtime_error("EnumDisplayMonitors failed");
+    return std::move(context.monitors);
 }
 
 WindowInfo find_unique_window(std::wstring_view title_substring) {

@@ -2,6 +2,7 @@
 #include "collection/collection_state.hpp"
 #include "dataset/dataset_writer.hpp"
 #include "core/json.hpp"
+#include "core/filesystem.hpp"
 #include "input/button_edge.hpp"
 #include <array>
 #include <atomic>
@@ -109,6 +110,26 @@ void simulated_scenarios(collection::Millis duration, bool pauses) {
               << ", delivered=" << delivered << ", terminal_skips=" << terminal_count
               << ", pending_high_water=" << high_water << '\n';
 }
+void large_timer_jump() {
+    collection::Settings settings; settings.periodic_interval = 1; settings.max_lateness = 0;
+    std::vector<std::string> events;
+    collection::CaptureScheduler scheduler(settings, [&](const std::string& event) { events.push_back(event); });
+    scheduler.set_active(true, 0, "start"); events.clear();
+    const auto due = scheduler.take_due(3600000);
+    expect(due.size() == 1 && due[0].event_id == 3600000 && due[0].planned_ms == 3600000,
+        "one-hour jump at 1ms accounts old deadlines and returns only a fresh timer");
+    expect(scheduler.stats().requested == 3600000 && scheduler.stats().expired == 3599999,
+        "aggregated timer counters preserve every requested deadline");
+    expect(events.size() == 2 && events[0].find("\"type\":\"timer_skipped_range\"") != std::string::npos,
+        "millions of skipped timers produce a bounded event list");
+    settings.max_lateness = 60000; settings.max_pending = 2;
+    events.clear();
+    collection::CaptureScheduler overflow(settings, [&](const std::string& event) { events.push_back(event); });
+    overflow.set_active(true, 0, "start"); events.clear();
+    expect(overflow.take_due(60000).size() == 2 && overflow.stats().overflow == 59998,
+        "timer overflow is aggregated while pending queue remains bounded");
+    expect(events.size() == 4, "two accepted timers plus range and merge need only four events");
+}
 core::Frame frame() {
     core::Frame f; f.size = {2, 2}; f.source_size = {800, 600}; f.roi = {10, 20, 2, 2};
     f.pixels.assign(16, 255); return f;
@@ -123,9 +144,14 @@ void writer_tests() {
         std::ofstream out(path, std::ios::binary); out << "encoded"; out.close();
         if (!out) throw std::runtime_error("test file write failed");
     });
+    struct ReleaseGuard {
+        std::mutex& gate; std::condition_variable& signal; bool& release;
+        ~ReleaseGuard() { { std::scoped_lock lock(gate); release = true; } signal.notify_all(); }
+    } cleanup{gate, signal, release};
     std::vector<collection::Request> request{{1, 1, 0, 0, "click"}};
     expect(w.try_enqueue(frame(), request), "first frame accepted");
-    { std::unique_lock lock(gate); signal.wait(lock, [&] { return entered; }); }
+    { std::unique_lock lock(gate); if (!signal.wait_for(lock, std::chrono::seconds(2), [&] { return entered; }))
+        throw std::runtime_error("writer did not start the gated encoder"); }
     request[0].event_id = 2; expect(w.try_enqueue(frame(), request), "one waiting frame accepted");
     request[0].event_id = 3; expect(!w.try_enqueue(frame(), request), "slow encoder causes recorded queue rejection");
     { std::scoped_lock lock(gate); release = true; } signal.notify_all(); w.finish();
@@ -155,9 +181,21 @@ void writer_tests() {
     catch (const std::filesystem::filesystem_error&) { propagated = true; }
     expect(propagated, "invalid disk destination is rejected at startup");
 }
+void directory_collisions() {
+    const auto root = std::filesystem::path("build/collection-unit") / ("directories_" + std::to_string(core::utc_milliseconds()));
+    std::array<std::filesystem::path, 8> paths;
+    std::array<std::thread, 8> workers;
+    std::array<std::exception_ptr, 8> errors;
+    for (std::size_t i = 0; i < workers.size(); ++i)
+        workers[i] = std::thread([&, i] { try { paths[i] = core::unique_directory(root, "same_stamp"); } catch (...) { errors[i] = std::current_exception(); } });
+    for (auto& worker : workers) worker.join();
+    for (auto error : errors) if (error) std::rethrow_exception(error);
+    expect(std::set<std::filesystem::path>(paths.begin(), paths.end()).size() == workers.size(),
+        "concurrent output reservations with identical timestamps cannot collide");
+}
 } // namespace
 int main() {
-    try { scheduler_tests(); simulated_scenarios(600000, true); simulated_scenarios(3600000, false); writer_tests(); }
+    try { scheduler_tests(); large_timer_jump(); simulated_scenarios(600000, true); simulated_scenarios(3600000, false); writer_tests(); directory_collisions(); }
     catch (const std::exception& ex) { ++failures; std::cerr << ex.what() << '\n'; }
     return failures ? 1 : 0;
 }

@@ -6,7 +6,8 @@ namespace pubg_vision::inference {
 MockModel::MockModel(ModelSpec spec, std::uint32_t seed) : spec_(std::move(spec)), random_(seed) {
     spec_.validate();
 }
-std::vector<Candidate> MockModel::run(const PreparedInput& input) {
+std::vector<Candidate> MockModel::run(const PreparedInput& input, std::stop_token stop) {
+    throw_if_cancelled(stop);
     if (input.shape != std::array<std::int64_t, 4>{1, 3, spec_.input_size.height, spec_.input_size.width} ||
         input.tensor.size() != static_cast<std::size_t>(spec_.input_size.width) * spec_.input_size.height * 3U)
         throw std::invalid_argument("mock model received a tensor incompatible with its ModelSpec");

@@ -67,7 +67,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
 [[nodiscard]] std::filesystem::path newest_png(const std::filesystem::path& directory) {
     std::filesystem::path newest;
     std::filesystem::file_time_type newest_time{};
-    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(directory)) {
         if (!entry.is_regular_file() || entry.path().extension() != L".png") {
             continue;
         }
@@ -303,15 +303,7 @@ int main(int argc, char* argv[]) {
         const auto primary_path = run_capture_case(window, {320, 240},
                                                     output_root / "primary", "Primary monitor");
 
-        std::vector<HMONITOR> monitors;
-        if (!EnumDisplayMonitors(nullptr, nullptr,
-                [](HMONITOR monitor, HDC, LPRECT, LPARAM parameter) -> BOOL {
-                    auto& found = *reinterpret_cast<std::vector<HMONITOR>*>(parameter);
-                    found.push_back(monitor);
-                    return TRUE;
-                }, reinterpret_cast<LPARAM>(&monitors))) {
-            throw std::runtime_error("EnumDisplayMonitors failed");
-        }
+        const auto monitors = pubg_vision::platform::windows::display_monitors();
         const HMONITOR primary_monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
         std::filesystem::path secondary_path;
         for (const HMONITOR monitor : monitors) {

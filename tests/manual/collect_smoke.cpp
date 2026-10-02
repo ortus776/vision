@@ -71,10 +71,7 @@ int main(int argc, char* argv[]) {
             if (elapsed >= 4800 && step == 6) { DestroyWindow(window); window = nullptr; ++step; }
             if (elapsed >= 5500 && step == 7) { window = make_window(); ++step; }
             if (elapsed >= 6500 && step == 8) {
-                std::vector<HMONITOR> monitors;
-                EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR m, HDC, LPRECT, LPARAM p) -> BOOL {
-                    reinterpret_cast<std::vector<HMONITOR>*>(p)->push_back(m); return TRUE;
-                }, reinterpret_cast<LPARAM>(&monitors));
+                const auto monitors = pubg_vision::platform::windows::display_monitors();
                 for (auto monitor : monitors) {
                     if (monitor == MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST)) continue;
                     MONITORINFO info{sizeof(info)};

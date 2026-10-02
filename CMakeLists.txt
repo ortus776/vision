@@ -10,6 +10,7 @@ include(CTest)
 find_package(Threads REQUIRED)
 
 add_library(pubg_vision_core STATIC
+    src/app/inference_model.cpp
     src/config/app_config.cpp
     src/collection/capture_scheduler.cpp
     src/dataset/dataset_writer.cpp
@@ -67,10 +68,18 @@ if(BUILD_TESTING)
     set_tests_properties(pubg_vision_collection_tests PROPERTIES TIMEOUT 60
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
     find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(WIN32)
+        add_executable(pubg_vision_collection_session_fixture tests/integration/collection_session_fixture.cpp)
+        target_link_libraries(pubg_vision_collection_session_fixture PRIVATE pubg_vision_windows)
+    endif()
     if(Python3_Interpreter_FOUND)
         add_test(NAME pubg_vision_session_validation
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/session_validation_test.py")
         if(WIN32)
+            add_test(NAME pubg_vision_collection_session_validation
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/collection_session_test.py"
+                    "$<TARGET_FILE:pubg_vision_collection_session_fixture>")
+            set_tests_properties(pubg_vision_collection_session_validation PROPERTIES TIMEOUT 30)
             add_test(NAME pubg_vision_inference_demo_validation
                 COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/inference_demo_test.py"
                     "$<TARGET_FILE:pubg_vision_app>")

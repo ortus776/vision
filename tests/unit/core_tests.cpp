@@ -149,6 +149,11 @@ void test_cli_configuration() {
     const auto demo = parse_arguments(demo_args);
     expect(demo && demo.config.inference_demo && demo.config.demo_frames == 3 && demo.config.mock_seed == 0,
         "demo needs no desktop window and accepts seed zero");
+    expect(demo.config.output == "build/inference-preview", "demo defaults to a separate directory outside raw dataset");
+    constexpr std::array<std::string_view,3> demo_output{"--output", "custom", "--inference-demo"};
+    expect(parse_arguments(demo_output).config.output == "custom", "explicit output wins regardless of mode argument order");
+    constexpr std::array<std::string_view,3> backend{"--inference-demo", "--backend", "mock"};
+    expect(parse_arguments(backend).config.backend == "mock", "backend choice is retained in config");
     constexpr std::array<std::string_view, 1> no_live_window{"--live"};
     expect(!parse_arguments(no_live_window), "live requires a target window");
     constexpr std::array<std::string_view, 4> live_collect{"--live", "--collect", "--window-title", "Test"};

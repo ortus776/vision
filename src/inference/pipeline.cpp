@@ -11,12 +11,15 @@ void PipelineSettings::validate() const {
         throw std::invalid_argument("inference FPS must be 1..120 and TTL 1..60000 ms");
 }
 DetectionResult process(const FramePacket& packet, Model& model,
-    const PostprocessSettings& settings, PreparedInput& scratch, const Clock& clock) {
+    const PostprocessSettings& settings, PreparedInput& scratch, const Clock& clock, std::stop_token stop) {
+    throw_if_cancelled(stop);
     if (!packet.frame.roi.valid() || packet.frame.roi.width != packet.frame.size.width ||
         packet.frame.roi.height != packet.frame.size.height)
         throw std::invalid_argument("frame dimensions must agree with its ROI");
     preprocess::prepare(packet.frame, model.spec(), scratch);
-    const auto candidates = model.run(scratch);
+    throw_if_cancelled(stop);
+    const auto candidates = model.run(scratch, stop);
+    throw_if_cancelled(stop);
     auto detections = postprocess::decode(candidates, scratch.transform, model.spec(), settings);
     return {packet.frame_id, packet.frame.generation, packet.frame.roi,
         packet.frame.captured_ms, clock(), std::move(detections)};
@@ -45,11 +48,17 @@ bool Pipeline::submit(FramePacket packet) {
     return true;
 }
 void Pipeline::invalidate(std::uint64_t generation, bool active) {
-    std::lock_guard lock(mutex_);
-    if (generation_ == generation && active_ == active) return;
-    generation_ = generation; active_ = active; ++revision_;
-    if (pending_) ++stats_.stale_discarded;
-    pending_.reset(); result_.reset();
+    std::stop_source running(std::nostopstate);
+    {
+        std::lock_guard lock(mutex_);
+        if (generation_ == generation && active_ == active) return;
+        generation_ = generation; active_ = active; ++revision_;
+        if (pending_) ++stats_.stale_discarded;
+        pending_.reset(); result_.reset();
+        running = run_stop_;
+    }
+    // Callbacks may enter the runtime; never execute them while holding our mutex.
+    running.request_stop();
     wake_.notify_one();
 }
 std::optional<DetectionResult> Pipeline::latest() const { std::lock_guard lock(mutex_); return result_; }
@@ -60,7 +69,9 @@ void Pipeline::check_error() const {
     if (error) std::rethrow_exception(error);
 }
 void Pipeline::stop() {
-    { std::lock_guard lock(mutex_); stopping_ = true; pending_.reset(); result_.reset(); }
+    std::stop_source running(std::nostopstate);
+    { std::lock_guard lock(mutex_); stopping_ = true; pending_.reset(); result_.reset(); running = run_stop_; }
+    running.request_stop();
     wake_.notify_one();
     if (worker_.joinable()) worker_.join();
 }
@@ -72,6 +83,7 @@ void Pipeline::run() noexcept {
         for (;;) {
             FramePacket packet;
             std::uint64_t revision{};
+            std::stop_token stop;
             {
                 std::unique_lock lock(mutex_);
                 wake_.wait(lock, [&] { return stopping_ || pending_.has_value(); });
@@ -83,6 +95,8 @@ void Pipeline::run() noexcept {
                 }
                 packet = std::move(*pending_); pending_.reset();
                 revision = revision_;
+                run_stop_ = std::stop_source{};
+                stop = run_stop_.get_token();
             }
             const auto began = std::chrono::steady_clock::now();
             next = began + period;
@@ -91,7 +105,11 @@ void Pipeline::run() noexcept {
                           packet.frame.roi, clock_(), settings_.ttl_ms)) {
                 std::lock_guard lock(mutex_); ++stats_.stale_discarded; continue;
             }
-            auto result = process(packet, *model_, settings_.postprocess, scratch, clock_);
+            DetectionResult result;
+            try { result = process(packet, *model_, settings_.postprocess, scratch, clock_, stop); }
+            catch (const Cancelled&) {
+                std::lock_guard lock(mutex_); ++stats_.stale_discarded; continue;
+            }
             std::lock_guard lock(mutex_);
             ++stats_.processed;
             if (!stopping_ && active_ && result.generation == generation_ && revision == revision_ &&

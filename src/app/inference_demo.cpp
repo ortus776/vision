@@ -2,6 +2,7 @@
 #include "app/inference_model.hpp"
 #include "capture/desktop_capture.hpp"
 #include "core/json.hpp"
+#include "core/filesystem.hpp"
 #include "inference/pipeline.hpp"
 #include "render/raster.hpp"
 #include <chrono>
@@ -18,20 +19,28 @@ void inference_demo(const config::AppConfig& config, const core::Logger& logger)
     const auto size = config.roi;
     if (!size.valid() || static_cast<std::uint64_t>(size.width) * size.height > 16U * 1024U * 1024U)
         throw std::invalid_argument("demo ROI exceeds the supported BGRA buffer size");
-    std::filesystem::create_directories(config.output);
-    const auto stamp = duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
-    std::filesystem::path directory;
-    bool created = false;
-    for (unsigned suffix = 0; suffix < 1000; ++suffix) {
-        directory = config.output / ("inference_demo_" + std::to_string(stamp) + "_" + std::to_string(suffix));
-        if (std::filesystem::create_directory(directory)) { created = true; break; }
-    }
-    if (!created) throw std::runtime_error("could not create a unique demo directory");
+    const auto directory = core::unique_directory(config.output,
+        "inference_demo_" + std::to_string(core::utc_milliseconds()));
     std::filesystem::create_directory(directory / "images");
     std::ofstream metadata(directory / "demo.json"), manifest(directory / "detections.jsonl");
     metadata.exceptions(std::ios::badbit | std::ios::failbit);
     manifest.exceptions(std::ios::badbit | std::ios::failbit);
-    metadata << "{\"backend\":\"mock\",\"seed\":" << config.mock_seed << ",\"frame_count\":" << config.demo_frames
+    metadata << "{\"backend\":" << core::json_string(model->backend_name()) << ",\"seed\":";
+    if (model->backend_name() == "mock") metadata << config.mock_seed;
+    else metadata << "null";
+    metadata << ",\"classes\":[";
+    bool separator = false;
+    for (const auto& name : model->spec().classes) {
+        if (separator) metadata << ',';
+        metadata << core::json_string(name); separator = true;
+    }
+    const auto& post = config.inference.postprocess;
+    metadata << "],\"confidence_threshold\":" << post.confidence_threshold
+        << ",\"nms_iou\":" << post.nms_iou << ",\"max_candidates\":" << post.max_candidates
+        << ",\"max_detections\":" << post.max_detections
+        << ",\"output_has_nms\":" << (model->spec().output_has_nms ? "true" : "false")
+        << ",\"padding_value\":" << static_cast<unsigned>(model->spec().padding_value)
+        << ",\"nms_coordinate_space\":\"input_pixels_before_clip\",\"frame_count\":" << config.demo_frames
         << ",\"input_shape\":[1,3," << model->spec().input_size.height << ',' << model->spec().input_size.width
         << "],\"format\":\"RGB float32 NCHW /255\",\"box_coordinates\":\"ROI pixels, XYXY\"}\n";
     metadata.close();
@@ -73,7 +82,7 @@ void inference_demo(const config::AppConfig& config, const core::Logger& logger)
         manifest << "]}\n"; manifest.flush();
     }
     manifest.close();
-    logger.write(core::LogLevel::info, "Mock inference demo: " + directory.string() +
+    logger.write(core::LogLevel::info, "Inference demo (" + std::string(model->backend_name()) + "): " + directory.string() +
         "; rendered PNG frames=" + std::to_string(config.demo_frames));
 }
 } // namespace pubg_vision::app

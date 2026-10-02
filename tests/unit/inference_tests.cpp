@@ -92,6 +92,18 @@ void postprocessing() {
     expect(postprocess::decode(candidates, transform, spec, settings).size() == 1, "output limit is enforced");
     transform.scale_y = 0;
     invalid([&] { (void)postprocess::decode(candidates, transform, spec, {}); }, "invalid transform rejected");
+    transform.scale_y = 1;
+    spec.output_has_nms = false;
+    const std::vector<inference::Candidate> edge{{{-100,0,100,100}, .9F, 0}, {{0,0,100,100}, .8F, 0}};
+    settings.max_detections = 100; settings.nms_iou = .6F;
+    const auto before_clip = postprocess::decode(edge, transform, spec, settings);
+    expect(before_clip.size() == 2 && near(before_clip[0].box.left, 0), "NMS uses original boxes before clipping at ROI edge");
+    settings.nms_iou = .5F;
+    expect(postprocess::decode(edge, transform, spec, settings).size() == 2, "IoU equal to the threshold is retained");
+    settings.nms_iou = .49F;
+    expect(postprocess::decode(edge, transform, spec, settings).size() == 1, "original overlapping boxes suppress above IoU threshold");
+    spec.output_has_nms = true;
+    expect(postprocess::decode(edge, transform, spec, settings).size() == 2, "embedded/NMS-free output bypasses external NMS");
 }
 void rendering_and_mock() {
     const std::vector<inference::Detection> boxes{{{2,2,8,8}, 1, 0}};
@@ -128,7 +140,7 @@ class GatedModel : public inference::Model {
 public:
     explicit GatedModel(std::shared_ptr<Gate> gate) : gate_(std::move(gate)) { spec_.input_size = {4,4}; }
     const inference::ModelSpec& spec() const noexcept override { return spec_; }
-    std::vector<inference::Candidate> run(const inference::PreparedInput&) override {
+    std::vector<inference::Candidate> run(const inference::PreparedInput&, std::stop_token = {}) override {
         std::unique_lock lock(gate_->mutex);
         if (++gate_->calls == 1) gate_->wake.wait(lock, [&] { return gate_->release; });
         return {{{1,1,3,3}, 1, 0}};
@@ -139,11 +151,16 @@ private:
 };
 void release(const std::shared_ptr<Gate>& gate) { std::lock_guard lock(gate->mutex); gate->release = true; gate->wake.notify_all(); }
 bool entered(const std::shared_ptr<Gate>& gate) { std::lock_guard lock(gate->mutex); return gate->calls > 0; }
+struct GateRelease {
+    std::shared_ptr<Gate> gate;
+    ~GateRelease() { release(gate); }
+};
 void asynchronous_pipeline() {
     inference::PipelineSettings settings; settings.fps = 120;
     {
         auto gate = std::make_shared<Gate>();
         inference::Pipeline pipeline(std::make_unique<GatedModel>(gate), settings, [] { return 0; });
+        GateRelease cleanup{gate}; // Unblocks the model before pipeline destruction during unwinding.
         pipeline.submit(packet(1)); expect(wait([&] { return entered(gate); }), "inference call started");
         for (std::uint64_t i = 2; i <= 100; ++i) pipeline.submit(packet(i));
         expect(pipeline.stats().replaced == 98, "overload keeps one latest pending frame");
@@ -155,6 +172,7 @@ void asynchronous_pipeline() {
     for (bool same_generation : {false, true}) {
         auto gate = std::make_shared<Gate>();
         inference::Pipeline pipeline(std::make_unique<GatedModel>(gate), settings, [] { return 0; });
+        GateRelease cleanup{gate};
         pipeline.submit(packet(1)); expect(wait([&] { return entered(gate); }), "blocked model started before invalidation");
         const std::uint64_t generation = same_generation ? 1 : 2;
         pipeline.invalidate(generation, false); pipeline.invalidate(generation, true);
@@ -166,6 +184,7 @@ void asynchronous_pipeline() {
         std::atomic<std::int64_t> now{0};
         auto gate = std::make_shared<Gate>();
         inference::Pipeline pipeline(std::make_unique<GatedModel>(gate), settings, [&] { return now.load(); });
+        GateRelease cleanup{gate};
         pipeline.submit(packet(1)); expect(wait([&] { return entered(gate); }), "TTL test started");
         now = 1000; release(gate);
         expect(wait([&] { return pipeline.stats().processed == 1; }), "slow result finished");
@@ -177,7 +196,7 @@ void asynchronous_pipeline() {
 class FailingModel : public inference::Model {
 public:
     const inference::ModelSpec& spec() const noexcept override { return spec_; }
-    std::vector<inference::Candidate> run(const inference::PreparedInput&) override { throw std::runtime_error("model test failure"); }
+    std::vector<inference::Candidate> run(const inference::PreparedInput&, std::stop_token = {}) override { throw std::runtime_error("model test failure"); }
 private:
     inference::ModelSpec spec_{{4,4}};
 };
@@ -190,9 +209,43 @@ void failure_propagation() {
     }), "model exception reaches owner thread");
     expect(!pipeline.latest() && !pipeline.submit(packet(2)), "failed worker publishes no results and rejects frames");
 }
+struct CancellationProbe { std::atomic<int> entered{}, cancelled{}; };
+class CancellableModel : public inference::Model {
+public:
+    explicit CancellableModel(std::shared_ptr<CancellationProbe> probe) : probe_(std::move(probe)) { spec_.input_size = {4,4}; }
+    const inference::ModelSpec& spec() const noexcept override { return spec_; }
+    std::vector<inference::Candidate> run(const inference::PreparedInput&, std::stop_token stop) override {
+        std::mutex mutex;
+        std::condition_variable_any wake;
+        std::unique_lock lock(mutex);
+        ++probe_->entered;
+        wake.wait(lock, stop, [] { return false; });
+        ++probe_->cancelled;
+        inference::throw_if_cancelled(stop);
+        return {};
+    }
+private:
+    std::shared_ptr<CancellationProbe> probe_;
+    inference::ModelSpec spec_;
+};
+void cooperative_cancellation() {
+    auto probe = std::make_shared<CancellationProbe>();
+    inference::PipelineSettings settings; settings.fps = 120;
+    inference::Pipeline pipeline(std::make_unique<CancellableModel>(probe), settings, [] { return 0; });
+    pipeline.submit(packet(1));
+    expect(wait([&] { return probe->entered == 1; }), "cancellable model entered Run");
+    pipeline.invalidate(1, false);
+    expect(wait([&] { return probe->cancelled == 1 && pipeline.stats().stale_discarded == 1; }), "pause cancels Run without a model failure");
+    pipeline.check_error();
+    pipeline.invalidate(1, true); pipeline.submit(packet(2));
+    expect(wait([&] { return probe->entered == 2; }), "new Run uses a fresh token after resume");
+    pipeline.stop();
+    expect(probe->cancelled == 2 && !pipeline.latest(), "stop cancels blocked Run and joins the worker");
+    pipeline.check_error();
+}
 }
 int main() {
-    try { preprocessing(); postprocessing(); rendering_and_mock(); asynchronous_pipeline(); failure_propagation(); }
+    try { preprocessing(); postprocessing(); rendering_and_mock(); asynchronous_pipeline(); failure_propagation(); cooperative_cancellation(); }
     catch (const std::exception& error) { std::cerr << "Unexpected exception: " << error.what() << '\n'; return 1; }
     if (failures) return 1;
     std::cout << "Inference, coordinates, rendering and latest-frame pipeline tests passed\n";

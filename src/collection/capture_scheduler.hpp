@@ -42,6 +42,7 @@ public:
 private:
     void add(Request request, Millis now);
     void log(const char* type, const Request& request, Millis now, const std::string& reason);
+    void skip_timers(std::uint64_t count, Millis now, const char* reason);
     Settings settings_;
     EventSink sink_;
     std::vector<Request> pending_;

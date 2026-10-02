@@ -1,5 +1,6 @@
 #include "dataset/dataset_writer.hpp"
 #include "core/json.hpp"
+#include "core/filesystem.hpp"
 #include <chrono>
 #include <iomanip>
 #include <sstream>
@@ -11,18 +12,12 @@ DatasetWriter::DatasetWriter(const std::filesystem::path& root, std::size_t capa
     : capacity_(capacity), encoder_(std::move(encoder)) {
     if (capacity == 0 || capacity > 4096 || !encoder_)
         throw std::invalid_argument("invalid writer settings");
-    std::filesystem::create_directories(root);
-    const auto stamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    // Atomic directory creation prevents collisions, including concurrent processes.
-    for (std::uint64_t suffix = 0;; ++suffix) {
-        session_id_ = "session_" + std::to_string(stamp) + '_' + std::to_string(suffix);
-        directory_ = root / session_id_;
-        if (std::filesystem::create_directory(directory_)) break;
-    }
+    const auto stamp = core::utc_milliseconds();
+    directory_ = core::unique_directory(root, "session_" + std::to_string(stamp));
+    session_id_ = directory_.filename().string();
     std::filesystem::create_directory(directory_ / "images");
     std::ofstream session(directory_ / "session.json", std::ios::binary);
-    session << "{\"schema_version\":1,\"session_id\":" << core::json_string(session_id_)
+    session << "{\"schema_version\":2,\"session_id\":" << core::json_string(session_id_)
             << ",\"started_utc_ms\":" << stamp << ",\"metadata\":" << metadata << "}\n";
     session.close();
     if (!session) throw std::runtime_error("could not write session.json");

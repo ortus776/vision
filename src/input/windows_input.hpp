@@ -4,6 +4,7 @@
 #include <deque>
 #include <functional>
 #include <string>
+#include <exception>
 #include "input/button_edge.hpp"
 
 namespace pubg_vision::input {
@@ -20,7 +21,7 @@ public:
     [[nodiscard]] std::deque<InputEvent> take();
     [[nodiscard]] std::uint64_t dropped() const noexcept { return dropped_; }
 private:
-    static LRESULT CALLBACK procedure(HWND window, UINT msg, WPARAM wp, LPARAM lp);
+    static LRESULT CALLBACK procedure(HWND window, UINT msg, WPARAM wp, LPARAM lp) noexcept;
     void push(Action action);
     void cleanup() noexcept;
     std::function<std::int64_t()> clock_;
@@ -28,7 +29,8 @@ private:
     bool registered_{}, toggle_registered_{}, stop_registered_{};
     LeftButtonEdge left_button_;
     std::uint64_t dropped_{};
-    std::string error_;
+    bool read_error_{};
+    std::exception_ptr error_;
     std::deque<InputEvent> events_;
 };
 } // namespace pubg_vision::input

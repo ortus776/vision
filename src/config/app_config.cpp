@@ -24,6 +24,7 @@ bool parse_dimension(std::string_view text, std::int32_t& output) {
 
 ParseResult parse_arguments(std::span<const std::string_view> args) {
     ParseResult result;
+    bool output_explicit = false;
     for (std::size_t i = 0; i < args.size(); ++i) {
         const auto arg = args[i];
         if (arg == "--help" || arg == "-h") {
@@ -74,12 +75,14 @@ ParseResult parse_arguments(std::span<const std::string_view> args) {
                     return result;
                 }
             } else if (arg == "--output") {
+                output_explicit = true;
                 result.config.output = std::filesystem::path(std::u8string(
                     reinterpret_cast<const char8_t*>(value.data()), value.size()));
             } else if (arg == "--window-title") {
                 result.config.window_title = value;
             } else if (arg == "--backend") {
                 if (value != "mock") { result.error = "only --backend mock is implemented; connect your model through inference::Model"; return result; }
+                result.config.backend = value;
             } else if (arg == "--overlay-style") {
                 if (value == "box") result.config.overlay_style = render::Style::box;
                 else if (value == "point") result.config.overlay_style = render::Style::point;
@@ -148,6 +151,7 @@ ParseResult parse_arguments(std::span<const std::string_view> args) {
         result.error = "--window-title requires --capture-once, --collect or --live";
     }
 
+    if (result.config.inference_demo && !output_explicit) result.config.output = "build/inference-preview";
     return result;
 }
 
@@ -180,7 +184,7 @@ Options:
   --window-title <text> Case-sensitive substring used to choose one window
   --roi-width <pixels>   Configured ROI width (default: 640)
   --roi-height <pixels>  Configured ROI height (default: 640)
-  --output <directory>   Output directory (default: data/raw)
+  --output <directory>   Output directory (demo: build/inference-preview; capture/collect: data/raw)
   --periodic-ms <ms>     Independent timer interval (default: 5000, max: 3600000)
   --merge-ms <ms>        Merge due requests within this window (default: 20)
   --max-lateness-ms <ms> Skip older requests (default: 100)

@@ -2,6 +2,9 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <string_view>
+#include <stop_token>
+#include <exception>
 #include <vector>
 #include "core/geometry.hpp"
 
@@ -27,12 +30,21 @@ struct PreparedInput {
     std::array<std::int64_t, 4> shape{};
     Transform transform;
 };
+class Cancelled final : public std::exception {
+public:
+    const char* what() const noexcept override { return "inference cancelled"; }
+};
+inline void throw_if_cancelled(std::stop_token stop) {
+    if (stop.stop_requested()) throw Cancelled{};
+}
 class Model {
 public:
     virtual ~Model() = default;
     [[nodiscard]] virtual const ModelSpec& spec() const noexcept = 0; // Immutable for this model's lifetime.
+    [[nodiscard]] virtual std::string_view backend_name() const noexcept { return "custom"; }
     // Called serially by the inference worker. Own/reuse the runtime session here.
-    [[nodiscard]] virtual std::vector<Candidate> run(const PreparedInput& input) = 0;
+    // Long-running adapters must honour stop, using their runtime cancellation API.
+    [[nodiscard]] virtual std::vector<Candidate> run(const PreparedInput& input, std::stop_token stop = {}) = 0;
 };
 struct PostprocessSettings {
     float confidence_threshold{0.25F};
