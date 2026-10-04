@@ -25,6 +25,7 @@ bool parse_dimension(std::string_view text, std::int32_t& output) {
 ParseResult parse_arguments(std::span<const std::string_view> args) {
     ParseResult result;
     bool output_explicit = false;
+    bool collector_option_explicit = false;
     for (std::size_t i = 0; i < args.size(); ++i) {
         const auto arg = args[i];
         if (arg == "--help" || arg == "-h") {
@@ -43,6 +44,9 @@ ParseResult parse_arguments(std::span<const std::string_view> args) {
             result.config.synthetic_source = true;
         } else if (arg == "--start-active") {
             result.config.start_active = true;
+        } else if (arg == "--trace-frames") {
+            result.config.trace_frames = true;
+            collector_option_explicit = true;
         } else if (arg == "--list-windows") {
             result.config.list_windows = true;
         } else if (arg == "--verbose") {
@@ -51,6 +55,7 @@ ParseResult parse_arguments(std::span<const std::string_view> args) {
                    arg == "--window-title" || arg == "--periodic-ms" ||
                    arg == "--merge-ms" || arg == "--max-lateness-ms" ||
                    arg == "--max-pending" || arg == "--writer-capacity" ||
+                   arg == "--collect-variant" || arg == "--collect-seconds" ||
                    arg == "--input-width" || arg == "--input-height" || arg == "--inference-fps" ||
                    arg == "--result-ttl-ms" || arg == "--confidence" || arg == "--nms-iou" ||
                    arg == "--mock-seed" || arg == "--demo-frames" || arg == "--backend" || arg == "--overlay-style") {
@@ -80,6 +85,14 @@ ParseResult parse_arguments(std::span<const std::string_view> args) {
                     reinterpret_cast<const char8_t*>(value.data()), value.size()));
             } else if (arg == "--window-title") {
                 result.config.window_title = value;
+            } else if (arg == "--collect-variant") {
+                collector_option_explicit = true;
+                if (value != "legacy" && value != "balanced" && value != "held" &&
+                    value != "png-none" && value != "png-store" && value != "capture-only" && value != "input-only") {
+                    result.error = "--collect-variant must be legacy, balanced, held, png-none, png-store, capture-only or input-only";
+                    return result;
+                }
+                result.config.collect_variant = value;
             } else if (arg == "--backend") {
                 if (value != "mock") { result.error = "only --backend mock is implemented; connect your model through inference::Model"; return result; }
                 result.config.backend = value;
@@ -110,13 +123,17 @@ ParseResult parse_arguments(std::span<const std::string_view> args) {
                 }
                 const auto limit = (arg == "--input-width" || arg == "--input-height") ? 2048 :
                     (arg == "--inference-fps" ? 120 : (arg == "--demo-frames" ? 1000 :
-                    (arg == "--periodic-ms" ? 3600000 :
-                    (arg == "--max-pending" || arg == "--writer-capacity" ? 4096 : 60000))));
+                    (arg == "--collect-seconds" ? 3600 : (arg == "--periodic-ms" ? 3600000 :
+                    (arg == "--max-pending" || arg == "--writer-capacity" ? 4096 : 60000)))));
                 if (number > limit) {
                     result.error = "value exceeds limit for " + std::string(arg);
                     return result;
                 }
-                if (arg == "--periodic-ms") result.config.collection.periodic_interval = number;
+                if (arg == "--collect-seconds") {
+                    collector_option_explicit = true;
+                    result.config.collect_seconds = number;
+                }
+                else if (arg == "--periodic-ms") result.config.collection.periodic_interval = number;
                 else if (arg == "--merge-ms") result.config.collection.merge_window = number;
                 else if (arg == "--max-lateness-ms") result.config.collection.max_lateness = number;
                 else if (arg == "--max-pending") result.config.collection.max_pending = static_cast<std::size_t>(number);
@@ -134,6 +151,9 @@ ParseResult parse_arguments(std::span<const std::string_view> args) {
     }
 
     if (result.config.show_help || result.config.show_version) return result;
+    if (collector_option_explicit && !result.config.collect) {
+        result.error = "--collect-variant, --collect-seconds and --trace-frames require --collect"; return result;
+    }
     if (result.config.synthetic_source && !result.config.live) {
         result.error = "--synthetic-source requires --live"; return result;
     }
@@ -168,6 +188,10 @@ Options:
   --capture-once        Capture one central crop and save it as a PNG
   --collect             Collect a dataset session (F8: start/pause, F9: stop)
   --start-active        Enable collection at launch; it starts when selected window has focus
+  --collect-variant <s> balanced (default), legacy, held, png-none, png-store, capture-only, input-only
+                        capture-only/input-only are diagnostics: no dataset images
+  --collect-seconds <n> Stop automatically after n wall-clock seconds (1..3600); default: F9
+  --trace-frames        Save asynchronous per-capture/PNG QPC timings for experiment analysis
   --live                Live capture -> mock model -> transparent overlay (F8: pause, F9: stop)
   --inference-demo      Render mock detections on synthetic frames to PNG, without desktop access
   --synthetic-source    In --live, generate test frames so overlay also animates on a static window

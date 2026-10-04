@@ -178,7 +178,7 @@ void expect_color(const std::vector<std::uint8_t>& pixels, int width, int x, int
 
 [[nodiscard]] std::filesystem::path run_capture_case(
     HWND window, pubg_vision::core::Size roi, const std::filesystem::path& output,
-    const char* label) {
+    const char* label, bool held = false) {
     MSG pending{};
     while (PeekMessageW(&pending, nullptr, 0, 0, PM_REMOVE)) {
         TranslateMessage(&pending);
@@ -221,7 +221,35 @@ void expect_color(const std::vector<std::uint8_t>& pixels, int width, int x, int
     std::exception_ptr capture_error;
     std::thread capture_thread([&] {
         try {
-            pubg_vision::capture::capture_once(config, logger);
+            if (!held) pubg_vision::capture::capture_once(config, logger);
+            else {
+                // Exercise retained ownership, geometry changes and reset on the same thread.
+                pubg_vision::capture::DesktopCapture source(true);
+                std::filesystem::create_directories(output);
+                std::uint64_t generation = 0;
+                for (int i = 0; i < 4; ++i) {
+                    const pubg_vision::core::Size size = i == 1
+                        ? pubg_vision::core::Size{roi.width - 20, roi.height - 20} : roi;
+                    if (i == 3) source.reset();
+                    source.prepare(reinterpret_cast<std::uintptr_t>(window), size);
+                    auto frame = source.next(1000);
+                    if (!frame || frame->generation <= generation)
+                        throw std::runtime_error("held capture lost a frame/generation after geometry change or reset");
+                    generation = frame->generation;
+                    const auto normal = output / ("held_" + std::to_string(i) + ".png");
+                    const auto no_filter = output / ("none_" + std::to_string(i) + ".png");
+                    pubg_vision::capture::encode_png(normal, size, frame->pixels);
+                    pubg_vision::capture::encode_png_no_filter(no_filter, size, frame->pixels);
+                    if (decode_png(normal, size) != frame->pixels || decode_png(no_filter, size) != frame->pixels)
+                        throw std::runtime_error("PNG filters changed captured BGRA pixels");
+                    // Repeated acquire without prepare exercises release-before-acquire.
+                    if (!source.next(1000)) throw std::runtime_error("held repeated acquire timed out");
+                    Sleep(50);
+                }
+                const auto stats = source.stats();
+                if (stats.frames != 8 || stats.acquired < 8 || stats.map_ms <= 0)
+                    throw std::runtime_error("capture telemetry counters do not match held acquisitions");
+            }
         } catch (...) {
             capture_error = std::current_exception();
         }
@@ -300,8 +328,9 @@ int main(int argc, char* argv[]) {
 
         const auto output_root = argc > 1 ? std::filesystem::path(argv[1])
                                           : std::filesystem::path("build/capture-smoke");
+        const bool held = argc > 2 && std::string(argv[2]) == "held";
         const auto primary_path = run_capture_case(window, {320, 240},
-                                                    output_root / "primary", "Primary monitor");
+                                                    output_root / "primary", "Primary monitor", held);
 
         const auto monitors = pubg_vision::platform::windows::display_monitors();
         const HMONITOR primary_monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
@@ -332,7 +361,7 @@ int main(int argc, char* argv[]) {
                 throw std::runtime_error("could not move smoke-test window to second monitor");
             }
             secondary_path = run_capture_case(window, {640, 480},
-                                              output_root / "secondary", "Second monitor");
+                                              output_root / "secondary", "Second monitor", held);
             break;
         }
 

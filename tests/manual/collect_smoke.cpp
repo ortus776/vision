@@ -49,7 +49,10 @@ int main(int argc, char* argv[]) {
         pubg_vision::config::AppConfig config;
         config.collect = true; config.window_title = "PUBG Vision сборщик Smoke Target";
         config.roi = {320, 240}; config.collection.periodic_interval = 150;
+        config.trace_frames = true;
         config.output = argc > 1 ? argv[1] : "build/collect-smoke";
+        if (argc > 2) config.collect_variant = argv[2];
+        if (argc > 3) config.collect_seconds = std::stoi(argv[3]);
         worker = std::thread([&] {
             try { pubg_vision::app::collect(config, pubg_vision::core::Logger{}); }
             catch (...) { failure = std::current_exception(); }

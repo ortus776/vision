@@ -137,6 +137,28 @@ void test_cli_configuration() {
     constexpr std::array<std::string_view, 1> invalid_start{"--start-active"};
     expect(!parse_arguments(invalid_start), "start-active requires collector command");
     expect(!collect.config.start_active, "collector still waits for F8 by default");
+    constexpr std::array<std::string_view, 4> trace_options{
+        "--collect", "--window-title", "PUBG", "--trace-frames"};
+    expect(parse_arguments(trace_options).config.trace_frames && !collect.config.trace_frames,
+           "per-frame collector tracing is opt-in");
+    constexpr std::array<std::string_view, 1> orphan_trace{"--trace-frames"};
+    expect(!parse_arguments(orphan_trace), "collector tracing requires collect mode");
+    expect(collect.config.collect_variant == "balanced", "collector defaults to balanced resource lifetime");
+    for (const auto variant : {"legacy", "balanced", "held", "png-none", "png-store", "capture-only", "input-only"}) {
+        const std::array<std::string_view, 7> options{
+            "--collect", "--window-title", "PUBG", "--collect-variant", variant, "--collect-seconds", "60"};
+        const auto parsed = parse_arguments(options);
+        expect(parsed && parsed.config.collect_variant == variant && parsed.config.collect_seconds == 60,
+               "accepts named collector experiments with a bounded duration");
+    }
+    for (const auto value : {"0", "-1", "3601", "12x"}) {
+        const std::array<std::string_view, 5> options{"--collect", "--window-title", "PUBG", "--collect-seconds", value};
+        expect(!parse_arguments(options), "rejects invalid collector duration");
+    }
+    const std::array<std::string_view, 5> bad_variant{"--collect", "--window-title", "PUBG", "--collect-variant", "unknown"};
+    expect(!parse_arguments(bad_variant), "rejects unknown collection experiment");
+    const std::array<std::string_view, 2> orphan_variant{"--collect-variant", "held"};
+    expect(!parse_arguments(orphan_variant), "collector experiment requires collect mode");
     constexpr std::array<std::string_view, 11> live_args{
         "--live", "--window-title", "Test", "--input-width", "320", "--inference-fps", "15",
         "--confidence", "0.4", "--overlay-style", "point"};

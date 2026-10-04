@@ -157,13 +157,25 @@ void writer_tests() {
     { std::scoped_lock lock(gate); release = true; } signal.notify_all(); w.finish();
     expect(w.stats().saved == 2 && w.stats().rejected == 1 && w.stats().high_water == 1,
            "stop drains exactly the accepted bounded queue");
-    expect(std::filesystem::exists(w.directory() / "images/frame_00000001.png") &&
-           !std::filesystem::exists(w.directory() / "images/frame_00000001.png.tmp"),
+    const auto first_image = "images/" + w.session_id() + "_frame_00000001.png";
+    expect(std::filesystem::exists(core::native_output_path(w.directory() / first_image)) &&
+           !std::filesystem::exists(core::native_output_path(w.directory() / (first_image + ".tmp"))),
            "atomic rename removes temporary name");
     std::ifstream manifest(w.directory() / "frames.jsonl"); std::string line; int lines{};
     while (std::getline(manifest, line)) { ++lines; expect(line.find("\"source_qpc\":null") != std::string::npos,
-                                                        "missing source time is explicit null"); }
+                                                        "missing source time is explicit null");
+        if (lines == 1) expect(line.find(core::json_string(first_image)) != std::string::npos,
+                               "manifest references the session-qualified image name"); }
     expect(lines == 2, "manifest only references successfully written frames");
+    dataset::DatasetWriter another(root / "another-output", 1, "{}", [](const auto& path, auto, const auto&) {
+        std::ofstream out(path, std::ios::binary); out << "encoded";
+    });
+    expect(another.try_enqueue(frame(), request), "another session accepts its first frame");
+    another.finish();
+    const auto another_image = another.session_id() + "_frame_00000001.png";
+    expect(std::filesystem::exists(another.directory() / "images" / another_image) &&
+           std::filesystem::path(first_image).filename() != another_image,
+           "first frames in different sessions and output roots have distinct filenames");
     dataset::DatasetWriter failed(root, 2, "{}", [](const auto&, auto, const auto&) {
         throw std::runtime_error("simulated disk full");
     });
@@ -193,9 +205,32 @@ void directory_collisions() {
     expect(std::set<std::filesystem::path>(paths.begin(), paths.end()).size() == workers.size(),
         "concurrent output reservations with identical timestamps cannot collide");
 }
+void trace_tests() {
+    const auto root = std::filesystem::path("build/collection-unit") / ("trace_" + std::to_string(core::utc_milliseconds()));
+    std::filesystem::create_directories(root);
+    dataset::TraceWriter writer(root / "trace.jsonl", 4);
+    std::set<std::string> accepted;
+    for (int i = 0; i < 1000; ++i) {
+        auto line = "{\"qpc\":" + std::to_string(i) + '}';
+        if (writer.try_event(line)) accepted.insert(line);
+    }
+    writer.finish(); writer.finish();
+    const auto stats = writer.stats();
+    expect(stats.written == accepted.size() && stats.written + stats.dropped == 1000 && stats.high_water <= 4,
+           "trace queue is bounded and accounts for every accepted or dropped record");
+    std::ifstream file(root / "trace.jsonl"); std::string line; std::set<std::string> written;
+    while (std::getline(file, line)) written.insert(line);
+    expect(written == accepted, "finish drains exactly the accepted trace records");
+    expect(!writer.try_event("{}") && writer.stats().dropped == stats.dropped + 1,
+           "late diagnostics are counted after trace close");
+    bool rejected{};
+    try { dataset::TraceWriter invalid(root / "missing/trace.jsonl"); }
+    catch (const std::runtime_error&) { rejected = true; }
+    expect(rejected, "trace startup fails explicitly for an unavailable destination");
+}
 } // namespace
 int main() {
-    try { scheduler_tests(); large_timer_jump(); simulated_scenarios(600000, true); simulated_scenarios(3600000, false); writer_tests(); directory_collisions(); }
+    try { scheduler_tests(); large_timer_jump(); simulated_scenarios(600000, true); simulated_scenarios(3600000, false); writer_tests(); directory_collisions(); trace_tests(); }
     catch (const std::exception& ex) { ++failures; std::cerr << ex.what() << '\n'; }
     return failures ? 1 : 0;
 }

@@ -5,6 +5,7 @@
 #include <wincodec.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <ctime>
@@ -23,6 +24,7 @@
 #include "capture/desktop_capture.hpp"
 #include "core/geometry.hpp"
 #include "core/filesystem.hpp"
+#include "core/performance_clock.hpp"
 #include "platform/windows/window_selection.hpp"
 
 namespace pubg_vision::capture {
@@ -86,6 +88,7 @@ public:
     }
 
     void mark_acquired() noexcept { acquired_ = true; }
+    void retain() noexcept { acquired_ = false; }
     HRESULT release() noexcept {
         if (!acquired_) {
             return S_OK;
@@ -128,7 +131,7 @@ void check_hr(HRESULT result, const char* operation) {
 
 void save_png(const std::filesystem::path& path,
               core::Size size,
-              const std::vector<std::uint8_t>& pixels) {
+              const std::vector<std::uint8_t>& pixels, bool no_filter = false) {
     const auto stride64 = static_cast<std::uint64_t>(size.width) * 4U;
     const auto buffer_size64 = stride64 * static_cast<std::uint64_t>(size.height);
     if (stride64 > std::numeric_limits<UINT>::max() ||
@@ -154,9 +157,18 @@ void save_png(const std::filesystem::path& path,
              "IWICBitmapEncoder::Initialize");
 
     ComPtr<IWICBitmapFrameEncode> frame;
-    check_hr(encoder->CreateNewFrame(frame.GetAddressOf(), nullptr),
+    ComPtr<IPropertyBag2> options;
+    check_hr(encoder->CreateNewFrame(frame.GetAddressOf(), options.GetAddressOf()),
              "IWICBitmapEncoder::CreateNewFrame");
-    check_hr(frame->Initialize(nullptr), "IWICBitmapFrameEncode::Initialize");
+    if (no_filter) {
+        PROPBAG2 property{};
+        property.pstrName = const_cast<wchar_t*>(L"FilterOption");
+        VARIANT value{};
+        value.vt = VT_UI1;
+        value.bVal = WICPngFilterNone;
+        check_hr(options->Write(1, &property, &value), "WIC PNG FilterOption");
+    }
+    check_hr(frame->Initialize(options.Get()), "IWICBitmapFrameEncode::Initialize");
     check_hr(frame->SetSize(static_cast<UINT>(size.width), static_cast<UINT>(size.height)),
              "IWICBitmapFrameEncode::SetSize");
 
@@ -223,7 +235,12 @@ struct SelectedOutput {
     ComPtr<ID3D11Texture2D>& staging_texture,
     std::uint32_t timeout_ms,
     std::int64_t& source_qpc,
-    std::int64_t minimum_present_qpc) {
+    std::int64_t minimum_present_qpc,
+    bool hold_frame, bool& held, CaptureStats& stats, CaptureTimings& timings) {
+    using Clock = std::chrono::steady_clock;
+    const auto elapsed = [](Clock::time_point begin) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
+    };
     D3D11_TEXTURE2D_DESC staging_desc{};
     staging_desc.Width = static_cast<UINT>(roi.width);
     staging_desc.Height = static_cast<UINT>(roi.height);
@@ -242,6 +259,10 @@ struct SelectedOutput {
     DXGI_OUTDUPL_FRAME_INFO frame_info{};
     ComPtr<IDXGIResource> desktop_resource;
     AcquiredFrame frame(duplication);
+    if (held) {
+        held = false;
+        check_hr(duplication->ReleaseFrame(), "IDXGIOutputDuplication::ReleaseFrame(before acquire)");
+    }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     for (;;) {
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -249,19 +270,25 @@ struct SelectedOutput {
         if (remaining.count() <= 0) {
             return std::nullopt;
         }
+        const auto acquire_start = Clock::now();
+        if (!timings.acquire_start) timings.acquire_start = core::qpc_ticks();
         const HRESULT result = duplication->AcquireNextFrame(
             static_cast<UINT>(remaining.count()), &frame_info,
             desktop_resource.GetAddressOf());
+        timings.acquire_end = core::qpc_ticks();
+        stats.acquire_ms += elapsed(acquire_start);
         if (result == DXGI_ERROR_WAIT_TIMEOUT) {
             return std::nullopt;
         }
         check_hr(result, "IDXGIOutputDuplication::AcquireNextFrame");
         frame.mark_acquired();
+        ++stats.acquired;
         if (frame_info.LastPresentTime.QuadPart != 0 &&
             frame_info.LastPresentTime.QuadPart >= minimum_present_qpc) {
             break;
         }
         // Reject pointer-only updates and images predating the current geometry.
+        ++stats.rejected_updates;
         check_hr(frame.release(), "IDXGIOutputDuplication::ReleaseFrame");
         desktop_resource.Reset();
     }
@@ -292,14 +319,22 @@ struct SelectedOutput {
                                    desktop_texture.Get(), 0, &source_box);
 
     D3D11_MAPPED_SUBRESOURCE mapped{};
+    const auto map_start = Clock::now();
+    timings.map_start = core::qpc_ticks();
     check_hr(context->Map(staging_texture.Get(), 0, D3D11_MAP_READ, 0, &mapped),
              "ID3D11DeviceContext::Map(staging)");
+    timings.map_end = core::qpc_ticks();
+    const auto map_ms = elapsed(map_start);
+    stats.map_ms += map_ms;
+    stats.max_map_ms = (std::max)(stats.max_map_ms, map_ms);
     struct UnmapGuard {
         ID3D11DeviceContext* context;
         ID3D11Resource* resource;
         ~UnmapGuard() { context->Unmap(resource, 0); }
     } unmap{context, staging_texture.Get()};
 
+    const auto copy_start = Clock::now();
+    timings.copy_start = core::qpc_ticks();
     const auto stride = static_cast<std::size_t>(roi.width) * 4U;
     if (mapped.RowPitch < stride) throw std::runtime_error("DXGI RowPitch is smaller than the ROI row");
     source_qpc = frame_info.LastPresentTime.QuadPart;
@@ -317,7 +352,14 @@ struct SelectedOutput {
         pixels[offset] = 255;
     }
 
-    check_hr(frame.release(), "IDXGIOutputDuplication::ReleaseFrame");
+    stats.copy_ms += elapsed(copy_start);
+    timings.copy_end = core::qpc_ticks();
+    if (hold_frame) {
+        // Keep ownership between sparse samples; release immediately before the next acquire.
+        // The local guard still releases on every exception before this ownership transfer.
+        frame.retain();
+        held = true;
+    } else check_hr(frame.release(), "IDXGIOutputDuplication::ReleaseFrame");
     return pixels;
 }
 
@@ -360,6 +402,15 @@ struct DesktopCapture::Impl {
     HWND handle{};
     std::uint64_t generation{};
     std::int64_t minimum_present_qpc{};
+    bool hold_frame{}, held{};
+    CaptureStats stats;
+    CaptureTimings timings;
+    explicit Impl(bool hold) : hold_frame(hold) {}
+    ~Impl() { release_held(); }
+    void release_held() noexcept {
+        if (held && duplication) (void)duplication->ReleaseFrame();
+        held = false;
+    }
     bool prepare(HWND target, core::Size roi) {
         const auto window = platform::windows::inspect_window(target);
         const auto absolute_roi = core::centered_rect(window.client_screen, roi);
@@ -390,6 +441,7 @@ struct DesktopCapture::Impl {
             size.width != roi.width || size.height != roi.height ||
             client.width != window.client_screen.width || client.height != window.client_screen.height;
         if (!changed) return false;
+        release_held();
         LARGE_INTEGER changed_at{};
         QueryPerformanceCounter(&changed_at);
         minimum_present_qpc = changed_at.QuadPart;
@@ -420,22 +472,28 @@ struct DesktopCapture::Impl {
         return true;
     }
 };
-DesktopCapture::DesktopCapture() : impl_(std::make_unique<Impl>()) {}
+DesktopCapture::DesktopCapture(bool hold_frame) : impl_(std::make_unique<Impl>(hold_frame)) {}
 DesktopCapture::~DesktopCapture() = default;
 bool DesktopCapture::prepare(std::uintptr_t window, core::Size roi) {
     return impl_->prepare(reinterpret_cast<HWND>(window), roi);
 }
 void DesktopCapture::reset() {
+    impl_->release_held();
     impl_->duplication.Reset(); impl_->staging.Reset();
     impl_->context.Reset(); impl_->device.Reset();
 }
+CaptureStats DesktopCapture::stats() const { return impl_->stats; }
+CaptureTimings DesktopCapture::last_timings() const { return impl_->timings; }
 std::optional<core::Frame> DesktopCapture::next(std::uint32_t timeout_ms) {
     if (!impl_->duplication) throw std::logic_error("capture source is not prepared");
     std::int64_t source_qpc{};
+    ++impl_->stats.calls;
+    impl_->timings = {};
     auto pixels = copy_desktop_crop(impl_->duplication.Get(), impl_->device.Get(),
         impl_->context.Get(), impl_->local, impl_->size, impl_->staging, timeout_ms, source_qpc,
-        impl_->minimum_present_qpc);
-    if (!pixels) return std::nullopt;
+        impl_->minimum_present_qpc, impl_->hold_frame, impl_->held, impl_->stats, impl_->timings);
+    if (!pixels) { ++impl_->stats.timeouts; return std::nullopt; }
+    ++impl_->stats.frames;
     core::Frame frame;
     frame.size = impl_->size; frame.source_size = {impl_->client.width, impl_->client.height};
     frame.roi = impl_->absolute; frame.generation = impl_->generation;
@@ -448,6 +506,11 @@ void encode_png(const std::filesystem::path& path, core::Size size,
                 const std::vector<std::uint8_t>& pixels) {
     ComApartment com;
     save_png(path, size, pixels);
+}
+void encode_png_no_filter(const std::filesystem::path& path, core::Size size,
+                          const std::vector<std::uint8_t>& pixels) {
+    ComApartment com;
+    save_png(path, size, pixels, true);
 }
 void capture_once(const config::AppConfig& config, const core::Logger& logger) {
     platform::windows::set_per_monitor_dpi_awareness();

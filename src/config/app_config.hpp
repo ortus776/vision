@@ -25,6 +25,9 @@ struct AppConfig {
     bool list_windows{false};
     bool collect{false};
     bool start_active{false};
+    std::string collect_variant{"balanced"};
+    std::int32_t collect_seconds{}; // 0: stop with F9.
+    bool trace_frames{false};
     bool live{false};
     bool inference_demo{false};
     bool synthetic_source{false};

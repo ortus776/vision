@@ -9,6 +9,7 @@
 # Runtime data and models
 /data/raw/
 /data/prepared/
+/data/performance/
 /reports/runs/
 /models/*.onnx
 /models/*.pt

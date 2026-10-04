@@ -12,8 +12,11 @@ find_package(Threads REQUIRED)
 add_library(pubg_vision_core STATIC
     src/app/inference_model.cpp
     src/config/app_config.cpp
+    src/core/performance_clock.cpp
     src/collection/capture_scheduler.cpp
     src/dataset/dataset_writer.cpp
+    src/dataset/png_encoder.cpp
+    src/dataset/trace_writer.cpp
     src/inference/model.cpp
     src/inference/mock_model.cpp
     src/inference/pipeline.cpp
@@ -73,6 +76,8 @@ if(BUILD_TESTING)
         target_link_libraries(pubg_vision_collection_session_fixture PRIVATE pubg_vision_windows)
     endif()
     if(Python3_Interpreter_FOUND)
+        add_test(NAME pubg_vision_experiment_analysis
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/experiment_analysis_test.py")
         add_test(NAME pubg_vision_session_validation
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/session_validation_test.py")
         if(WIN32)
@@ -94,5 +99,9 @@ if(BUILD_TESTING)
         target_link_libraries(pubg_vision_capture_smoke PRIVATE pubg_vision_windows gdi32 dwmapi)
         add_executable(pubg_vision_collect_smoke tests/manual/collect_smoke.cpp)
         target_link_libraries(pubg_vision_collect_smoke PRIVATE pubg_vision_windows gdi32)
+        add_executable(pubg_vision_png_benchmark tests/manual/png_benchmark.cpp)
+        target_link_libraries(pubg_vision_png_benchmark PRIVATE pubg_vision_windows)
+        add_executable(pubg_vision_presentmon_target tests/manual/presentmon_target.cpp)
+        target_link_libraries(pubg_vision_presentmon_target PRIVATE pubg_vision_windows)
     endif()
 endif()

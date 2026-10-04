@@ -13,7 +13,8 @@
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build/windows-msvc",
       "cacheVariables": {
-        "BUILD_TESTING": "ON"
+        "BUILD_TESTING": "ON",
+        "CMAKE_CXX_FLAGS_RELEASE": "/O2 /Ob2 /DNDEBUG"
       }
     }
   ],

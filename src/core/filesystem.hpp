@@ -5,6 +5,20 @@
 #include <string>
 
 namespace pubg_vision::core {
+// Dataset sessions repeat their unique ID in image filenames. Nested experiment
+// folders can exceed MAX_PATH; use the extended Win32 namespace for file IO.
+inline std::filesystem::path native_output_path(const std::filesystem::path& path) {
+#ifdef _WIN32
+    auto absolute = std::filesystem::absolute(path).lexically_normal();
+    absolute.make_preferred();
+    const auto& text = absolute.native();
+    if (text.starts_with(L"\\\\?\\")) return absolute;
+    if (text.starts_with(L"\\\\")) return std::filesystem::path(L"\\\\?\\UNC\\" + text.substr(2));
+    return std::filesystem::path(L"\\\\?\\" + text);
+#else
+    return path;
+#endif
+}
 // create_directory atomically reserves names across threads and processes.
 inline std::filesystem::path unique_directory(const std::filesystem::path& root, const std::string& prefix) {
     std::filesystem::create_directories(root);

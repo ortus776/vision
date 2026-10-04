@@ -14,5 +14,6 @@ struct Frame {
     std::int64_t captured_ms{};
     std::int64_t captured_utc_ms{};
     std::optional<std::int64_t> source_qpc; // DXGI LastPresentTime, not a UTC timestamp.
+    std::optional<std::int64_t> capture_end_qpc; // CPU capture completion, for writer queue timing.
 };
 } // namespace pubg_vision::core
